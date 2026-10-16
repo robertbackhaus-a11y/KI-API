@@ -189,6 +189,11 @@
   </div>
 
   <div id="side-panel" class="hidden">
+    <div class="panel-section" id="panel-live">
+      <h2>Aktivität</h2>
+      <div class="meta-line" id="live-meta">Keine Stage aktiv.</div>
+      <pre id="live-log"></pre>
+    </div>
     <div class="panel-section" id="panel-context">
       <h2>Kontext</h2>
       <div class="meta-line" id="context-meta">-</div>
@@ -214,6 +219,8 @@ const togglePanelBtn = document.getElementById('toggle-panel');
 const sidePanel = document.getElementById('side-panel');
 const contextMetaEl = document.getElementById('context-meta');
 const contextPreviewEl = document.getElementById('context-preview');
+const liveMetaEl = document.getElementById('live-meta');
+const liveLogEl = document.getElementById('live-log');
 
 let sessionId = null;
 let stageRunning = false;
@@ -453,11 +460,17 @@ function handleSseFrame(frame, stageDiv) {
 
   if (eventType === 'stage_started') {
     setStatus(`Gestartet (pid ${data.pid}) ...`);
+    liveMetaEl.textContent = `läuft (pid ${data.pid}) ...`;
+    liveLogEl.textContent = '';
   } else if (eventType === 'heartbeat') {
     setStatus(`läuft seit ${data.elapsed_s}s ...`);
+  } else if (eventType === 'log_line') {
+    liveLogEl.textContent += (liveLogEl.textContent ? '\n' : '') + data.text;
+    liveLogEl.scrollTop = liveLogEl.scrollHeight;
   } else if (eventType === 'stage_completed') {
     updateStageMessage(stageDiv, data);
     setStatus('');
+    liveMetaEl.textContent = `Letzte Stage beendet (${data.status}).`;
     refreshContextPreview();
   }
   logEl.scrollTop = logEl.scrollHeight;

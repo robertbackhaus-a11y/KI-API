@@ -468,19 +468,37 @@ class MessageIn(BaseModel):
         return v
 
 
-def _drain_capped(stream, chunks: list[bytes], limit: int) -> None:
+def _drain_capped(stream, chunks: list[bytes], limit: int,
+                   events: queue.Queue | None = None) -> None:
     """Leert eine Pipe DURCHGAENGIG waehrend der Subprozess laeuft (voller Puffer =
-    Deadlock) und haelt nur die letzten `limit` Bytes (Tail) fuer Event/Response."""
+    Deadlock) und haelt nur die letzten `limit` Bytes (Tail) fuer Event/Response).
+    Mit `events`: pusht zusaetzlich JEDE vollstaendige Zeile SOFORT als eigenes
+    SSE-Event ('log_line') -- live-Sichtbarkeit in der GUI, z. B. ob/wann
+    run_substage laeuft, ohne auf das Stage-Ende zu warten. Bewusst nur fuer
+    stderr genutzt (stage_runner.py._log() schreibt dorthin, stdout ist leer)."""
     try:
         total = 0
+        buf = b""
         while True:
-            chunk = stream.read(65536)
+            # read1() statt read(): read() auf einem BufferedReader versucht, die
+            # VOLLEN 65536 Bytes zu sammeln (blockiert also, bis entweder so viel
+            # Output anfiel oder die Pipe schloss) -- fuer Live-Streaming unbrauchbar,
+            # eine Stage mit wenig Output haette NIE eine Zeile live gezeigt, bis sie
+            # fertig war. read1() liefert sofort, was verfuegbar ist (mind. 1 Byte).
+            chunk = stream.read1(65536)
             if not chunk:
                 break
             chunks.append(chunk)
             total += len(chunk)
             while total > limit and len(chunks) > 1:
                 total -= len(chunks.pop(0))
+            if events is not None:
+                buf += chunk
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    text = line.decode("utf-8", errors="replace").rstrip("\r")
+                    if text:
+                        events.put(("log_line", {"text": text}))
     except Exception as exc:
         log.warning("Pipe-Drain unterbrochen: %s", exc)
     finally:
@@ -719,14 +737,17 @@ def _build_task_text(session: dict, message: str) -> str:
     return f"{history_text}--- Aktueller Auftrag ---\n{message}"
 
 
-def _start_stage(session_id: str, body: MessageIn) -> tuple[StageContext, dict]:
+def _start_stage(session_id: str, body: MessageIn,
+                  events: queue.Queue) -> tuple[StageContext, dict]:
     """P5-Startphase -- die bisherige _run_stage-Logik BIS VOR die Warte- und
     Finalisierungsphase, 1:1 unveraendert: Task-Tempdatei, Kill-Job, Subprozess,
     LiveStage-Registry, stage_record + JSONL-Events (message_received,
     stage_started), Pipe-Drainer, Watchdog. Wird vom POST /messages-Handler
     UNTER dem Session-Lock aufgerufen (404/409-Pruefung vorher). Liefert den
     Kontext fuer die Finalisierungsphase plus das stage_started-Datenobjekt
-    (wird als erstes SSE-Event gepusht)."""
+    (wird als erstes SSE-Event gepusht). `events`: der stderr-Drainer pusht
+    jede Log-Zeile sofort als 'log_line'-Event (Live-Sichtbarkeit, z. B. ob/
+    wann run_substage laeuft -- Nutzer-Anfrage nach einem unbemerkten Haenger)."""
     stage_id = str(uuid.uuid4())
     started_at = _utcnow()
     start_mono = time.monotonic()
@@ -808,10 +829,20 @@ def _start_stage(session_id: str, body: MessageIn) -> tuple[StageContext, dict]:
             "stage_id": stage_id, "exit_code": None, "pid": proc.pid,
             "model": body.model, "project": body.project, "started_at": started_at}))
 
+        # SSE stage_started VOR den Drainern pushen -- garantiert, dass der Client
+        # dieses Event vor jeder moeglichen log_line-Zeile sieht (die Drainer
+        # koennten sonst sofort nach dem Start schon etwas lesen).
+        started_data = {
+            "stage_id": stage_id, "status": "running", "exit_code": None,
+            "pid": proc.pid, "model": body.model, "project": body.project,
+            "started_at": started_at,
+        }
+        events.put(("stage_started", started_data))
+
         # stdout/stderr DURCHGAENGIG leeren (voller Pipe-Puffer = Deadlock), Tails behalten.
         drainers = [
             threading.Thread(target=_drain_capped, args=(proc.stdout, out_chunks, TAIL_LIMIT), daemon=True),
-            threading.Thread(target=_drain_capped, args=(proc.stderr, err_chunks, TAIL_LIMIT), daemon=True),
+            threading.Thread(target=_drain_capped, args=(proc.stderr, err_chunks, TAIL_LIMIT, events), daemon=True),
         ]
         for t in drainers:
             t.start()
@@ -854,11 +885,6 @@ def _start_stage(session_id: str, body: MessageIn) -> tuple[StageContext, dict]:
         live.done_event.set()
         raise
 
-    started_data = {
-        "stage_id": stage_id, "status": "running", "exit_code": None,
-        "pid": proc.pid, "model": body.model, "project": body.project,
-        "started_at": started_at,
-    }
     return StageContext(
         session_id=session_id, body=body, stage_id=stage_id, proc=proc,
         job_handle=job_handle, live=live, task_path=task_path,
@@ -1041,10 +1067,9 @@ def post_message(session_id: str, body: MessageIn) -> StreamingResponse:
             raise HTTPException(status_code=404, detail="unknown session_id")
         if _running_stage(_sessions[session_id]) is not None:
             raise HTTPException(status_code=409, detail="stage already running for this session")
-        ctx, started_data = _start_stage(session_id, body)
-    # stage_started vorab pushten (vor der Worker-Finalisierung; garantiert
-    # Reihenfolge und dass es auch bei sofortigem Abbruch ankommt).
-    events.put(("stage_started", started_data))
+        ctx, _started_data = _start_stage(session_id, body, events)
+    # stage_started wird bereits INNERHALB _start_stage gepusht (vor den
+    # Drainer-Threads, siehe dort) -- garantiert Reihenfolge vor jeder log_line.
     worker = threading.Thread(target=_stage_worker, args=(ctx, events), daemon=True)
     worker.start()
     return StreamingResponse(
