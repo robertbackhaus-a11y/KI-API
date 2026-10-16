@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.pyc
+sessions/
+tasks/
+*.log
+*.pid
+*.done
+*.jsonl
+test-p3/*.json
+test-p3/*.txt
+test-p4/server*.log
+test-p4/*.log
+test-p4/*.txt
+test-p5/*.txt
+test-p5/server_p5.*
