@@ -151,6 +151,15 @@
     padding: 8px; max-height: 400px; overflow-y: auto; margin: 0;
   }
   .panel-section .empty { font-size: 12px; color: var(--text-dim); font-style: italic; }
+  #substages-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+  #substages-list li {
+    font-size: 12px; padding: 6px 8px; border-radius: 6px;
+    border: 1px solid var(--border); background: var(--bg);
+    display: flex; align-items: center; gap: 6px;
+  }
+  #substages-list .sdot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); flex: 0 0 auto; }
+  #substages-list li.done .sdot { background: var(--success); }
+  #substages-list .stext { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 </style>
 </head>
 <body>
@@ -194,12 +203,16 @@
       <div class="meta-line" id="live-meta">Keine Stage aktiv.</div>
       <pre id="live-log"></pre>
     </div>
+    <div class="panel-section" id="panel-substages">
+      <h2>Hintergrundaufgaben</h2>
+      <div class="meta-line" id="substages-meta">Keine Sub-Stages in dieser Stage.</div>
+      <ul id="substages-list"></ul>
+    </div>
     <div class="panel-section" id="panel-context">
       <h2>Kontext</h2>
       <div class="meta-line" id="context-meta">-</div>
       <pre id="context-preview"></pre>
     </div>
-    <!-- Spaeter: weitere panel-section fuer Hintergrundaufgaben/Sub-Stages -->
   </div>
 </div>
 
@@ -221,6 +234,8 @@ const contextMetaEl = document.getElementById('context-meta');
 const contextPreviewEl = document.getElementById('context-preview');
 const liveMetaEl = document.getElementById('live-meta');
 const liveLogEl = document.getElementById('live-log');
+const substagesMetaEl = document.getElementById('substages-meta');
+const substagesListEl = document.getElementById('substages-list');
 
 let sessionId = null;
 let stageRunning = false;
@@ -462,11 +477,14 @@ function handleSseFrame(frame, stageDiv) {
     setStatus(`Gestartet (pid ${data.pid}) ...`);
     liveMetaEl.textContent = `läuft (pid ${data.pid}) ...`;
     liveLogEl.textContent = '';
+    substagesListEl.innerHTML = '';
+    substagesMetaEl.textContent = 'Keine Sub-Stages in dieser Stage.';
   } else if (eventType === 'heartbeat') {
     setStatus(`läuft seit ${data.elapsed_s}s ...`);
   } else if (eventType === 'log_line') {
     liveLogEl.textContent += (liveLogEl.textContent ? '\n' : '') + data.text;
     liveLogEl.scrollTop = liveLogEl.scrollHeight;
+    handleSubstageLogLine(data.text);
   } else if (eventType === 'stage_completed') {
     updateStageMessage(stageDiv, data);
     setStatus('');
@@ -480,6 +498,29 @@ const HEALTH_POLL_MS = 5000;
 const dotApi = document.getElementById('dot-api');
 const dotOllama = document.getElementById('dot-ollama');
 const dotRunner = document.getElementById('dot-runner');
+
+// run_substage blockiert (subprocess.run) -- stage_runner.py loggt deshalb NICHTS
+// waehrend eine Sub-Stage laeuft, nur einen Start-Marker (von uns ergaenzt) und am
+// Ende die normale TOOL-run_substage(...)-Zeile (dispatch-Schleife, kommt erst NACH
+// Abschluss). Client-seitiges Mustererkennen auf dem Log-Text, rein kosmetisch --
+// main.py interpretiert den Log-Text selbst nirgends (Zielarchitektur-Konstante).
+let openSubstages = [];
+function handleSubstageLogLine(text) {
+  const startMatch = text.match(/run_substage GESTARTET: (.*)$/);
+  if (startMatch) {
+    const li = document.createElement('li');
+    li.innerHTML = `<span class="sdot"></span><span class="stext"></span>`;
+    li.querySelector('.stext').textContent = startMatch[1];
+    substagesListEl.appendChild(li);
+    openSubstages.push(li);
+    substagesMetaEl.textContent = `${openSubstages.length} Sub-Stage(s) in dieser Stage.`;
+    return;
+  }
+  if (/TOOL run_substage\(/.test(text)) {
+    const li = openSubstages.shift();
+    if (li) li.classList.add('done');
+  }
+}
 
 function setDot(el, state) {
   el.className = 'dot ' + state;
