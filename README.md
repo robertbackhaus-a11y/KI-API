@@ -92,9 +92,16 @@ pro Session gleichzeitig). Beispiel:
       -H "Content-Type: application/json" ^
       -d "{\"message\": \"Sag kurz Hallo und ruf dann finish_stage auf\"}"
 
-Vertagt: Begrenzter Chat-Kontext fuer Folgeauftraege (der Task-Slot erhaelt vorerst
-die Nachricht unveraendert) -- eigenes Paket nach P5. stage_runner.py wird NICHT
-importiert, sondern als separater Subprozess aufgerufen und bleibt unveraendert.
+Begrenzter Kontext: der Task-Slot bekommt nicht mehr NUR die aktuelle Nachricht,
+sondern zusaetzlich die letzten CONTEXT_MAX_TURNS (Default 5) abgeschlossenen
+Turns dieser Session als kurze Orientierung (Nutzer-Nachricht + Stage-
+Zusammenfassung, bei CONTEXT_MAX_CHARS gekappt) -- siehe _build_task_text in
+main.py. KEIN Vollverlauf, dauerhaftes Wissen bleibt weiterhin Aufgabe des
+Modells per memory_write. Die persistierte Nachrichten-Historie
+(session["messages"]) enthaelt weiterhin die ORIGINALE, kurze Nachricht.
+
+stage_runner.py wird NICHT importiert, sondern als separater Subprozess
+aufgerufen und bleibt unveraendert.
 
 ## Einmalig einrichten
 

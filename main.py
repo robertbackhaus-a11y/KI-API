@@ -646,6 +646,48 @@ def _sse_frame(etype: str, data: dict) -> str:
     return f"event: {etype}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
+# Folgepaket "begrenzter Kontext fuer Folgeauftraege" (Zielarchitektur v1, bewusst
+# NICHT Teil von P5): bewusst KEIN Vollverlauf -- nur eine kurze Orientierung ueber
+# die letzten paar abgeschlossenen Turns, damit ein Folgeauftrag nicht komplett
+# kontextlos ist. Dauerhaftes Wissen bleibt weiterhin Aufgabe des Modells selbst
+# (memory_write), das hier NICHT ersetzt.
+CONTEXT_MAX_TURNS = 5
+CONTEXT_MAX_CHARS = 6000
+
+
+def _build_task_text(session: dict, message: str) -> str:
+    """Baut den Task-Text aus den letzten CONTEXT_MAX_TURNS abgeschlossenen Turns
+    dieser Session (Nutzer-Nachricht + Stage-Zusammenfassung) plus der aktuellen
+    Nachricht. Wird NUR in den Task-Slot geschrieben (was das Modell sieht) --
+    die persistierte message_received-/session["messages"]-Historie bleibt die
+    ORIGINALE, kurze Nachricht, sonst wuerde sich der Kontext bei jedem Folge-
+    Turn selbst-rekursiv aufblaehen. Keine laufenden Stages (koennen in dieser
+    Session gar nicht vorkommen, da Start erst nach der 409-Pruefung erfolgt)."""
+    stages_by_id = {s["stage_id"]: s for s in session.get("stages", [])}
+    turns: list[tuple[str, str]] = []
+    for m in session.get("messages", []):
+        stage = stages_by_id.get(m.get("stage_id"))
+        if stage is None or stage.get("status") in (None, "running"):
+            continue
+        summary = stage.get("summary") or f"(Status: {stage.get('status')}, keine Zusammenfassung)"
+        turns.append((m.get("content", ""), summary))
+    turns = turns[-CONTEXT_MAX_TURNS:]
+
+    if not turns:
+        return message
+
+    lines = ["Bisheriger Verlauf dieser Session (kurze Orientierung, nicht zwingend "
+             "alles relevant fuer den aktuellen Auftrag):", ""]
+    for user_msg, summary in turns:
+        lines.append(f"Nutzer (vorher): {user_msg}")
+        lines.append(f"Ergebnis: {summary}")
+        lines.append("")
+    history_text = "\n".join(lines)
+    if len(history_text) > CONTEXT_MAX_CHARS:
+        history_text = "[...gekuerzt...]\n" + history_text[-CONTEXT_MAX_CHARS:]
+    return f"{history_text}--- Aktueller Auftrag ---\n{message}"
+
+
 def _start_stage(session_id: str, body: MessageIn) -> tuple[StageContext, dict]:
     """P5-Startphase -- die bisherige _run_stage-Logik BIS VOR die Warte- und
     Finalisierungsphase, 1:1 unveraendert: Task-Tempdatei, Kill-Job, Subprozess,
@@ -658,11 +700,15 @@ def _start_stage(session_id: str, body: MessageIn) -> tuple[StageContext, dict]:
     started_at = _utcnow()
     start_mono = time.monotonic()
     deadline = start_mono + STAGE_TIMEOUT_S
+    session = _sessions[session_id]
 
     # Task-Text als UTF-8-Tempdatei: --task @datei umgeht das Windows-argv-Limit (P3).
+    # Folgepaket "begrenzter Kontext": der Task-Slot bekommt nicht mehr NUR die
+    # aktuelle Nachricht, sondern zusaetzlich die letzten CONTEXT_MAX_TURNS
+    # abgeschlossenen Turns dieser Session als kurze Orientierung (_build_task_text).
     fd, task_path = tempfile.mkstemp(prefix=f"{stage_id}-", suffix=".txt", dir=TASK_TMP_DIR)
     with os.fdopen(fd, "w", encoding="utf-8") as f:
-        f.write(body.message)
+        f.write(_build_task_text(session, body.message))
 
     # P4: erst Job anlegen, dann Prozess starten, dann zuweisen. KILL_ON_JOB_CLOSE
     # ist ab SetInformationJobObject aktiv; alles, was der Prozess spaeter startet
@@ -698,7 +744,6 @@ def _start_stage(session_id: str, body: MessageIn) -> tuple[StageContext, dict]:
     with _live_guard:
         _live_stages[session_id] = live
 
-    session = _sessions[session_id]
     stage_record = {
         "stage_id": stage_id, "status": "running", "exit_code": None,
         "pid": proc.pid, "model": body.model, "project": body.project,
