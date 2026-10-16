@@ -623,6 +623,23 @@ def get_session(session_id: str) -> dict:
     return session
 
 
+@app.get("/sessions/{session_id}/context", include_in_schema=False)
+def get_context_preview(session_id: str) -> dict:
+    """Zeigt, was der begrenzte Kontext (_build_task_text) JETZT einer naechsten
+    Nachricht voranstellen wuerde -- reine Vorschau, startet keine Stage. Fuer
+    das Kontext-Panel der GUI."""
+    session = _sessions.get(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="unknown session_id")
+    turns = _collect_context_turns(session)
+    return {
+        "turns_included": len(turns),
+        "max_turns": CONTEXT_MAX_TURNS,
+        "max_chars": CONTEXT_MAX_CHARS,
+        "preview": _render_context_history(turns),
+    }
+
+
 @dataclass
 class StageContext:
     """Zwischenstand einer Stage zwischen Startphase (Request-Thread, unter
@@ -657,14 +674,10 @@ CONTEXT_MAX_TURNS = 5
 CONTEXT_MAX_CHARS = 6000
 
 
-def _build_task_text(session: dict, message: str) -> str:
-    """Baut den Task-Text aus den letzten CONTEXT_MAX_TURNS abgeschlossenen Turns
-    dieser Session (Nutzer-Nachricht + Stage-Zusammenfassung) plus der aktuellen
-    Nachricht. Wird NUR in den Task-Slot geschrieben (was das Modell sieht) --
-    die persistierte message_received-/session["messages"]-Historie bleibt die
-    ORIGINALE, kurze Nachricht, sonst wuerde sich der Kontext bei jedem Folge-
-    Turn selbst-rekursiv aufblaehen. Keine laufenden Stages (koennen in dieser
-    Session gar nicht vorkommen, da Start erst nach der 409-Pruefung erfolgt)."""
+def _collect_context_turns(session: dict) -> list[tuple[str, str]]:
+    """Die letzten CONTEXT_MAX_TURNS ABGESCHLOSSENEN Turns dieser Session
+    (Nutzer-Nachricht, Stage-Zusammenfassung). Keine laufenden Stages (koennen
+    hier gar nicht vorkommen, da ein Start erst nach der 409-Pruefung erfolgt)."""
     stages_by_id = {s["stage_id"]: s for s in session.get("stages", [])}
     turns: list[tuple[str, str]] = []
     for m in session.get("messages", []):
@@ -673,11 +686,14 @@ def _build_task_text(session: dict, message: str) -> str:
             continue
         summary = stage.get("summary") or f"(Status: {stage.get('status')}, keine Zusammenfassung)"
         turns.append((m.get("content", ""), summary))
-    turns = turns[-CONTEXT_MAX_TURNS:]
+    return turns[-CONTEXT_MAX_TURNS:]
 
+
+def _render_context_history(turns: list[tuple[str, str]]) -> str:
+    """Rendert die Turns als Orientierungstext, bei CONTEXT_MAX_CHARS gekappt.
+    Leerer String, wenn keine Turns vorliegen (erster Auftrag einer Session)."""
     if not turns:
-        return message
-
+        return ""
     lines = ["Bisheriger Verlauf dieser Session (kurze Orientierung, nicht zwingend "
              "alles relevant fuer den aktuellen Auftrag):", ""]
     for user_msg, summary in turns:
@@ -687,6 +703,19 @@ def _build_task_text(session: dict, message: str) -> str:
     history_text = "\n".join(lines)
     if len(history_text) > CONTEXT_MAX_CHARS:
         history_text = "[...gekuerzt...]\n" + history_text[-CONTEXT_MAX_CHARS:]
+    return history_text
+
+
+def _build_task_text(session: dict, message: str) -> str:
+    """Baut den Task-Text aus dem begrenzten Kontext (siehe _collect_context_turns/
+    _render_context_history) plus der aktuellen Nachricht. Wird NUR in den
+    Task-Slot geschrieben (was das Modell sieht) -- die persistierte
+    message_received-/session["messages"]-Historie bleibt die ORIGINALE, kurze
+    Nachricht, sonst wuerde sich der Kontext bei jedem Folge-Turn selbst-
+    rekursiv aufblaehen."""
+    history_text = _render_context_history(_collect_context_turns(session))
+    if not history_text:
+        return message
     return f"{history_text}--- Aktueller Auftrag ---\n{message}"
 
 
