@@ -721,6 +721,7 @@ def _start_stage(session_id: str, body: MessageIn) -> tuple[StageContext, dict]:
             [str(STAGE_PYTHON), str(STAGE_RUNNER),
              "--model", body.model, "--project", body.project,
              "--think", "on" if body.think else "off",
+             "--role", "main",
              "--task", f"@{task_path}"],
             cwd=str(STAGE_RUNNER_DIR),
             stdout=subprocess.PIPE,
