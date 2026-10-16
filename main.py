@@ -758,6 +758,11 @@ def _start_stage(session_id: str, body: MessageIn) -> tuple[StageContext, dict]:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             creationflags=CREATE_NO_WINDOW,
+            # Ohne PYTHONIOENCODING schreibt Python auf einem Nicht-Konsolen-Stream
+            # unter Windows in der System-Codepage (hier 850, nicht UTF-8) -- main.py
+            # dekodiert stdout/stderr hart als UTF-8, also wurden Umlaute etc. zu
+            # "?" (gefunden: "Kl?rung" statt "Klaerung" im stderr_tail der GUI).
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
         )
         _assign_process_to_job(job_handle, proc)
     except Exception as exc:
