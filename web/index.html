@@ -55,6 +55,13 @@
   header h1 { font-size: 15px; font-weight: 600; margin: 0; flex: 0 0 auto; }
   header .session-id { font-size: 11px; color: var(--text-dim); font-family: monospace; }
   header .spacer { flex: 1; }
+
+  #health { display: flex; gap: 10px; align-items: center; }
+  #health .hitem { display: flex; align-items: center; gap: 4px; font-size: 11px; color: var(--text-dim); }
+  #health .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-dim); flex: 0 0 auto; }
+  #health .dot.ok { background: var(--success); }
+  #health .dot.down, #health .dot.missing { background: var(--error); }
+  #health .dot.checking { background: var(--warn); }
   select, input[type=text] {
     font-size: 12px;
     padding: 4px 6px;
@@ -129,6 +136,11 @@
 <header>
   <h1>Reaper</h1>
   <span class="session-id" id="session-id">-</span>
+  <div id="health">
+    <span class="hitem"><span class="dot checking" id="dot-api"></span>API</span>
+    <span class="hitem"><span class="dot checking" id="dot-ollama"></span>Ollama</span>
+    <span class="hitem"><span class="dot checking" id="dot-runner"></span>Runner</span>
+  </div>
   <div class="spacer"></div>
   <label class="opt">Modell
     <select id="model">
@@ -379,8 +391,35 @@ function handleSseFrame(frame, stageDiv) {
   logEl.scrollTop = logEl.scrollHeight;
 }
 
+const HEALTH_POLL_MS = 5000;
+const dotApi = document.getElementById('dot-api');
+const dotOllama = document.getElementById('dot-ollama');
+const dotRunner = document.getElementById('dot-runner');
+
+function setDot(el, state) {
+  el.className = 'dot ' + state;
+}
+
+async function pollHealth() {
+  try {
+    const r = await fetch(`${API}/health`, { cache: 'no-store' });
+    if (!r.ok) throw new Error('health http ' + r.status);
+    const h = await r.json();
+    setDot(dotApi, h.api === 'ok' ? 'ok' : 'down');
+    setDot(dotOllama, h.ollama === 'ok' ? 'ok' : 'down');
+    setDot(dotRunner, h.stage_runner === 'ok' ? 'ok' : 'missing');
+  } catch (e) {
+    // API selbst nicht erreichbar -- alles unbekannt/down, keine Folgeschluesse moeglich.
+    setDot(dotApi, 'down');
+    setDot(dotOllama, 'down');
+    setDot(dotRunner, 'down');
+  }
+}
+
 loadPrefs();
 ensureSession();
+pollHealth();
+setInterval(pollHealth, HEALTH_POLL_MS);
 </script>
 
 </body>

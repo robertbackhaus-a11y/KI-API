@@ -62,6 +62,7 @@ import logging
 import os
 import queue
 import re
+import socket
 import subprocess
 import sys
 import tempfile
@@ -413,6 +414,32 @@ def index() -> FileResponse:
     oeffentlichen Endpunkte dieser API an (Sessions/Messages/Abort), kennt
     stage_runner.py/Ollama/Basic-Memory nicht."""
     return FileResponse(WEB_DIR / "index.html")
+
+
+OLLAMA_HEALTH_HOST = "127.0.0.1"
+OLLAMA_HEALTH_PORT = 11434
+
+
+def _tcp_reachable(host: str, port: int, timeout_s: float = 1.0) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=timeout_s):
+            return True
+    except OSError:
+        return False
+
+
+@app.get("/health", include_in_schema=False)
+def health() -> dict:
+    """Rein diagnostischer Status fuer die GUI-Ampel -- KEINE funktionale
+    Abhaengigkeit: main.py ruft Ollama nie selbst auf (das macht ausschliesslich
+    der stage_runner.py-Subprozess), hier wird nur per TCP-Connect geprueft, ob
+    der Port offen ist, damit die GUI anzeigen kann, warum eine Stage haengen
+    wuerde, BEVOR der Nutzer eine Nachricht abschickt."""
+    return {
+        "api": "ok",
+        "ollama": "ok" if _tcp_reachable(OLLAMA_HEALTH_HOST, OLLAMA_HEALTH_PORT) else "down",
+        "stage_runner": "ok" if STAGE_PYTHON.exists() and STAGE_RUNNER.exists() else "missing",
+    }
 
 
 class MessageIn(BaseModel):
