@@ -76,7 +76,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field, field_validator
-from starlette.responses import StreamingResponse
+from starlette.responses import FileResponse, StreamingResponse
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("reaper-api")
@@ -397,12 +397,22 @@ async def lifespan(_app: FastAPI):
 # Nur Loopback: lokales Single-User-System, keine Authentifizierung (Architektur-constraint).
 app = FastAPI(
     title="Reaper API",
-    version="0.5.0-p5",
+    version="0.6.0-gui",
     docs_url=None,
     redoc_url=None,
     openapi_url=None,
     lifespan=lifespan,
 )
+
+WEB_DIR = APP_DIR / "web"
+
+
+@app.get("/", include_in_schema=False)
+def index() -> FileResponse:
+    """Liefert die einseitige Chat-GUI (web/index.html) aus; spricht NUR die
+    oeffentlichen Endpunkte dieser API an (Sessions/Messages/Abort), kennt
+    stage_runner.py/Ollama/Basic-Memory nicht."""
+    return FileResponse(WEB_DIR / "index.html")
 
 
 class MessageIn(BaseModel):
@@ -675,8 +685,16 @@ def _start_stage(session_id: str, body: MessageIn) -> tuple[StageContext, dict]:
              stage_id, session_id, proc.pid, body.model)
     try:
         session["stages"].append(stage_record)
-        _append_event(session_id, _new_event("message_received", {
-            "role": "user", "content": body.message, "stage_id": stage_id}))
+        msg_event = _new_event("message_received", {
+            "role": "user", "content": body.message, "stage_id": stage_id})
+        _append_event(session_id, msg_event)
+        # Im-Memory-Zustand des LAUFENDEN Servers muss dieselbe Nachricht sehen wie eine
+        # Rekonstruktion nach Neustart (_apply_event) -- sonst zeigt GET /sessions/{id}
+        # waehrend der Laufzeit leere "messages", obwohl die JSONL-Datei korrekt ist
+        # (Bug gefunden beim GUI-Test: Reload zeigte leeren Verlauf trotz korrekter Datei).
+        session["messages"].append({
+            "role": "user", "content": body.message,
+            "stage_id": stage_id, "ts": msg_event["ts"]})
         _append_event(session_id, _new_event("stage_started", {
             "stage_id": stage_id, "exit_code": None, "pid": proc.pid,
             "model": body.model, "project": body.project, "started_at": started_at}))

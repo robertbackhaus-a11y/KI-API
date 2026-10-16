@@ -1,11 +1,18 @@
-# Reaper API (P5)
+# Reaper API (P5 + GUI)
 
 HTTP-Geruest fuer den Chat-Frontend-Zugang zu stage_runner.py (Zielarchitektur v1,
 siehe coding-v2 decision_record im Folder stage-runner). Lokales Single-User-System,
 nur Loopback, keine Authentifizierung.
 
-## Stand: P5
+## Stand: P5 + einseitige Chat-GUI
 
+- GET  /                         liefert web/index.html aus (einseitige Chat-GUI,
+                                 kein Build-Schritt, kein Framework). Spricht
+                                 AUSSCHLIESSLICH die unten dokumentierten Endpunkte
+                                 an; kennt stage_runner.py/Ollama/Basic-Memory nicht.
+                                 Session-Id wird im localStorage des Browsers
+                                 gehalten -- Reload laedt denselben Verlauf per
+                                 GET /sessions/{id} neu.
 - POST /sessions                 neue Session anlegen (session_id = UUID v4); legt
                                  sessions/<session_id>.jsonl mit der ersten Zeile an
 - GET  /sessions/{id}            Session lesen; 404 wenn unbekannt
