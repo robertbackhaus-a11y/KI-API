@@ -1,8 +1,13 @@
-# Reaper API (P5 + GUI)
+# Reaper API
 
 HTTP-Geruest fuer den Chat-Frontend-Zugang zu stage_runner.py (Zielarchitektur v1,
 siehe coding-v2 decision_record im Folder stage-runner). Lokales Single-User-System,
 nur Loopback, keine Authentifizierung.
+
+Seit 2026-10-16 Reapers EINZIGER Chat-Kanal (Jan wurde dafuer abgeloest): Ollama
+bedient sowohl das Hauptmodell (qwen3.8-q5:latest, role=main -- volle REAPER-
+Persona, siehe stage_runner.py) als auch das schnelle Worker-Modell fuer per
+run_substage delegierte Teilaufgaben (Default qwen3:8b).
 
 ## Stand: P5 + einseitige Chat-GUI
 
@@ -36,7 +41,7 @@ Request-Body (JSON):
 
     {
       "message": "<Nutzer-Task-Text>",     # Pflicht, nicht leer
-      "model":   "qwen3:8b",               # optional, Default wie gezeigt (lokales Ollama-Modell)
+      "model":   "qwen3.8-q5:latest",      # optional, Default wie gezeigt (Reapers Hauptmodell)
       "project": "coding-v2",              # optional, Default wie gezeigt (Basic-Memory-Projekt)
       "think":   false                     # optional, Default false (Reasoning AUS); true =
                                            # Modell denkt mit (Ollama 'think'); Qwen3/Q5 ohne

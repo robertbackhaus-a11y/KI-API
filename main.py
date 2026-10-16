@@ -109,8 +109,10 @@ HEARTBEAT_INTERVAL_S = 5.0
 
 # Request-Defaults: lokal vorhandene Ollama-Modelle (verifiziert 2026-10-15: qwen3:8b
 # 8.2B Q4_K_M und qwen3.8-q5 27.3B Q5_K_M; das qwen36-a3b:latest aus dem Runner-Beispiel
-# existiert NICHT). qwen3:8b = schnell genug fuer interaktive Chat-Stages, tools-faehig.
-DEFAULT_MODEL = "qwen3:8b"
+# existiert NICHT). Seit dem Umzug weg von Jan (2026-10-16) ist Ollama die EINZIGE
+# Modell-Quelle -- qwen3.8-q5 ist Reapers Hauptmodell (role=main, volle Persona),
+# qwen3:8b bleibt das schnelle Default-Modell fuer run_substage-Worker-Stages.
+DEFAULT_MODEL = "qwen3.8-q5:latest"
 DEFAULT_PROJECT = "coding-v2"  # Basic-Memory-Projekt, in dem das Stage-Wissen haengt
 
 # Exit-Code -> Status. NUR hier abgeleitet; Logtext wird NICHT fuer Status geparst.
