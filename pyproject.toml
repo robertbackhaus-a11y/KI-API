@@ -8,15 +8,20 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "reaper-ai"
 dynamic = ["version"]
-description = "Local chat GUI and FastAPI layer for the stage runner (Ollama), single-user, loopback only."
+description = "Local chat GUI, FastAPI layer and integrated stage runner (Ollama tool loop), single-user, loopback only."
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 license = "GPL-3.0-or-later"
 license-files = ["LICENSE"]
 authors = [{ name = "Robert Backhaus" }]
 dependencies = [
     "fastapi>=0.143.2,<1",
     "uvicorn>=0.54.0,<1",
+    # Stage runner (reaper_ai.runner.stage_runner): Ollama/web HTTP calls.
+    "requests>=2.32,<3",
+    # Stage runner memory tools. The runner uses Basic Memory's internal client API
+    # (mcp.clients, note_content_materialization) -- pinned to the tested minor line.
+    "basic-memory>=0.23.2,<0.24",
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -25,7 +30,6 @@ classifiers = [
     "Intended Audience :: Developers",
     "Operating System :: Microsoft :: Windows",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
 ]
 

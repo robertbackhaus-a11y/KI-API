@@ -21,9 +21,10 @@ Target architecture v1 (coding-v2, stage-runner, decision_record):
 - POST /sessions/{id}/abort       abort the running stage in a controlled way (P4);
                                   the process tree incl. pwsh child processes is killed
 
-A stage = the existing C:\tools\stage-runner\stage_runner.py as a separate
-subprocess (with its own venv there). The runner code stays unchanged and is NOT
-imported. Exit codes 0-3 are the ONLY status source (target architecture); aborted
+A stage = the integrated runner reaper_ai.runner.stage_runner as a separate
+subprocess (`python -P -m reaper_ai.runner.stage_runner`, same interpreter as the
+API by default). The runner is the sole agent orchestrator and is NOT imported
+here. Exit codes 0-3 are the ONLY status source (target architecture); aborted
 stages (user abort or API watchdog) have exit_code=null because there is no runner
 verdict. The stdout/stderr pipes are drained continuously (full pipe buffer =
 deadlock) and provide diagnostic tails plus the finish_stage summary as display
@@ -87,7 +88,15 @@ from starlette.responses import FileResponse, StreamingResponse
 from starlette.staticfiles import StaticFiles
 
 from . import __version__
-from .config import DEFAULT_RUNNER_DIR, data_dir, default_runner_python, ollama_host_port
+from .config import (
+    data_dir,
+    ollama_host_port,
+    powershell_install_hint,
+    resolve_powershell,
+    runner_command,
+    runner_is_integrated,
+    workspace_dir as config_workspace_dir,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("reaper-api")
@@ -100,17 +109,42 @@ APP_DIR = Path(__file__).resolve().parent
 DATA_DIR = data_dir()
 SESSIONS_DIR = DATA_DIR / "sessions"
 TASK_TMP_DIR = DATA_DIR / "tasks"  # temp task files for --task @file (Windows argv limit)
+# Default working directory for run_powershell (passed to the runner as
+# REAPER_WORKDIR). Deliberately a dedicated sub-directory, NOT DATA_DIR itself:
+# a relative path in a model command must not be created among the sessions/tasks/
+# config files. Matches config.workspace_dir / the integrated runner's cwd.
+WORKSPACE_DIR = config_workspace_dir(DATA_DIR)
 
-# Stage runner: existing code, own venv, own directory -- only as a subprocess.
-# Directory configurable via REAPER_STAGE_RUNNER_DIR (or runner_dir in config.toml);
-# Python/script can additionally be overridden individually (regression tests in
-# test-queue/ use this for a fake runner). Without configuration it is still
-# C:\tools\stage-runner as before.
-STAGE_RUNNER_DIR = Path(os.environ.get("REAPER_STAGE_RUNNER_DIR") or DEFAULT_RUNNER_DIR)
-STAGE_PYTHON = Path(os.environ["REAPER_STAGE_PYTHON"]) if os.environ.get("REAPER_STAGE_PYTHON") \
-    else default_runner_python(STAGE_RUNNER_DIR)
-STAGE_RUNNER = Path(os.environ["REAPER_STAGE_RUNNER_SCRIPT"]) if os.environ.get("REAPER_STAGE_RUNNER_SCRIPT") \
-    else STAGE_RUNNER_DIR / "stage_runner.py"
+# Stage runner: integrated module reaper_ai.runner.stage_runner, ALWAYS started as a
+# separate subprocess (`python -m reaper_ai.runner.stage_runner`) and never imported
+# here. Default interpreter = the API's own interpreter (same venv, dependencies
+# from pyproject.toml). Overrides (see config.runner_command):
+#   REAPER_STAGE_PYTHON         other interpreter (e.g. a separate venv)
+#   REAPER_STAGE_RUNNER_SCRIPT  external runner script instead of the module
+#                               (regression tests use this for test-queue/fake_runner.py;
+#                               also a rollback path to an old standalone runner)
+STAGE_PYTHON, STAGE_RUNNER_ARGS, STAGE_RUNNER_CWD = runner_command(DATA_DIR)
+# Path of the runner code (module file or external script) -- only for the
+# presence check in lifespan/health; NOT imported.
+STAGE_RUNNER = Path(STAGE_RUNNER_ARGS[-1]) if not runner_is_integrated() \
+    else APP_DIR / "runner" / "stage_runner.py"
+# The package directory containing reaper_ai -- prepended to PYTHONPATH of the
+# runner subprocess so `-m reaper_ai.runner.stage_runner` resolves to exactly this
+# copy of the package (also when running from the checkout without pip install).
+_PACKAGE_PARENT = str(APP_DIR.parent)
+
+
+def _runner_env() -> dict[str, str]:
+    """Environment of the runner subprocess: os.environ inherited completely,
+    PYTHONIOENCODING forced to UTF-8, package parent prepended to PYTHONPATH."""
+    env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+    # R08/workdir: default working directory for run_powershell relative paths --
+    # the dedicated workspace, never the data directory itself (see WORKSPACE_DIR).
+    env["REAPER_WORKDIR"] = str(WORKSPACE_DIR)
+    if runner_is_integrated():
+        old = env.get("PYTHONPATH")
+        env["PYTHONPATH"] = _PACKAGE_PARENT + (os.pathsep + old if old else "")
+    return env
 
 # API watchdog: deliberately LARGER than the runner's internal wall-clock emergency
 # brake (20 min), so a normal stage always ends on its own first (rc=2); it only fires
@@ -579,9 +613,21 @@ def _running_stage(session: dict) -> dict | None:
 async def lifespan(_app: FastAPI):
     SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
     TASK_TMP_DIR.mkdir(parents=True, exist_ok=True)
+    WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)  # run_powershell default cwd (relative paths)
     if not STAGE_PYTHON.exists() or not STAGE_RUNNER.exists():
-        log.warning("stage_runner.py incomplete (%s / %s) -- POST /messages will return 500",
+        log.warning("stage runner incomplete (%s / %s) -- POST /messages will return 500",
                     STAGE_PYTHON, STAGE_RUNNER)
+    # R08: surface the PowerShell situation here too (covers the checkout/run.ps1
+    # path that starts uvicorn directly, bypassing the CLI banner). Informational
+    # only; the runner refuses run_powershell cleanly when no pwsh 7 is present.
+    pwsh = resolve_powershell()
+    if pwsh:
+        log.info("run_powershell PowerShell: %s (non-packaged, job-contained)", pwsh)
+    else:
+        log.warning("no regular (non-packaged) PowerShell 7 found -- run_powershell will "
+                    "refuse to execute. %s", powershell_install_hint().replace("\n", " "))
+    log.info("Stage runner: %s %s (cwd %s)", STAGE_PYTHON, " ".join(STAGE_RUNNER_ARGS),
+             STAGE_RUNNER_CWD)
     _sessions.update(_load_sessions())
     if _sessions:
         log.info("%d session(s) reconstructed from %s", len(_sessions), SESSIONS_DIR)
@@ -615,7 +661,7 @@ app.mount("/vendor", StaticFiles(directory=WEB_DIR / "vendor"), name="vendor")
 
 
 # From REAPER_OLLAMA_URL (or ollama_url in config.toml), default 127.0.0.1:11434.
-# Only for the diagnostic status light: stage_runner.py uses its own hard-coded URL.
+# Only for the diagnostic status light; the runner subprocess reads REAPER_OLLAMA_URL itself.
 OLLAMA_HEALTH_HOST, OLLAMA_HEALTH_PORT = ollama_host_port()
 
 
@@ -1179,12 +1225,12 @@ def _start_stage(session_id: str, body: MessageIn,
     try:
         job_handle = _create_kill_job()
         proc = subprocess.Popen(
-            [str(STAGE_PYTHON), str(STAGE_RUNNER),
+            [str(STAGE_PYTHON), *STAGE_RUNNER_ARGS,
              "--model", body.model, "--project", body.project,
              "--think", "on" if body.think else "off",
              "--role", "main",
              "--task", f"@{task_path}"],
-            cwd=str(STAGE_RUNNER_DIR),
+            cwd=str(STAGE_RUNNER_CWD),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             creationflags=CREATE_NO_WINDOW | CREATE_SUSPENDED,
@@ -1198,8 +1244,10 @@ def _start_stage(session_id: str, body: MessageIn,
             # Python on Windows writes to a non-console stream in the system code
             # page (here 850, not UTF-8) -- main.py decodes stdout/stderr strictly
             # as UTF-8, so umlauts etc. became "?" (found: "Kl?rung" instead of
-            # "Klaerung" in the GUI's stderr_tail).
-            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+            # "Klaerung" in the GUI's stderr_tail). PYTHONPATH gets the package
+            # parent prepended so `-m reaper_ai.runner.stage_runner` finds this
+            # package copy (inherited by run_substage worker subprocesses too).
+            env=_runner_env(),
         )
         _assign_process_to_job(job_handle, proc)
         resumed = _resume_all_threads(proc.pid)

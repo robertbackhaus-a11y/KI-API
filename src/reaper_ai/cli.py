@@ -4,15 +4,16 @@
 """Command line `reaper-ai`:
 
     reaper-ai run      [--host H] [--port P] [--data-dir D] [--ollama-url U]
-                       [--runner-dir R] [--no-browser]
+                       [--no-browser]
     reaper-ai stop     [--data-dir D]
     reaper-ai migrate  SOURCE_DIR [--data-dir D]
     reaper-ai --version
 
 `run` starts the existing FastAPI app (reaper_ai.main:app) with uvicorn in the
 foreground (single process, as run.ps1 did before) and writes a PID file into the
-data directory; `stop` terminates exactly that process (tree). The stage runner
-stays an external subprocess and is only checked for presence here.
+data directory; `stop` terminates exactly that process (tree). The stage runner is
+part of the package (reaper_ai.runner.stage_runner); the API starts it per stage as
+a separate subprocess -- it is never imported or started here.
 """
 
 from __future__ import annotations
@@ -95,7 +96,6 @@ def _resolve(args: argparse.Namespace) -> Path:
         "REAPER_HOST": getattr(args, "host", None),
         "REAPER_PORT": getattr(args, "port", None),
         "REAPER_OLLAMA_URL": getattr(args, "ollama_url", None),
-        "REAPER_STAGE_RUNNER_DIR": getattr(args, "runner_dir", None),
     }
     for env, value in overrides.items():
         if value is not None:
@@ -124,19 +124,41 @@ def cmd_run(args: argparse.Namespace) -> int:
         print(f"WARNING: bind address {host} is not loopback. Reaper-AI has no "
               f"authentication and is intended for local single-user operation.", file=sys.stderr)
 
-    # Same order as in main.py: directory first, Python/script can be overridden individually.
-    runner_dir = Path(os.environ.get("REAPER_STAGE_RUNNER_DIR") or config.DEFAULT_RUNNER_DIR)
-    runner_py = Path(os.environ.get("REAPER_STAGE_PYTHON") or config.default_runner_python(runner_dir))
-    runner_script = Path(os.environ.get("REAPER_STAGE_RUNNER_SCRIPT") or runner_dir / "stage_runner.py")
+    # Same resolution as in main.py (config.runner_command).
+    runner_py, runner_args, _ = config.runner_command(data_dir)
+    if config.runner_is_integrated():
+        runner_label = f"integrated ({config.RUNNER_MODULE})"
+        runner_ok = runner_py.exists() and (Path(__file__).resolve().parent / "runner" / "stage_runner.py").exists()
+    else:
+        runner_label = f"external script {runner_args[0]}"
+        runner_ok = runner_py.exists() and Path(runner_args[0]).exists()
+    if os.environ.get("REAPER_STAGE_RUNNER_DIR"):
+        print("WARNING: REAPER_STAGE_RUNNER_DIR is obsolete and ignored (the stage runner is "
+              "integrated; set REAPER_STAGE_RUNNER_SCRIPT only to run an external runner).",
+              file=sys.stderr)
     o_host, o_port = config.ollama_host_port()
+    # R08: a regular, non-packaged PowerShell 7 is required for shell execution.
+    # This is only a startup check with a clear hint -- the server still starts
+    # (so --version/--help and the GUI work and a pip install needs no PowerShell);
+    # the actual guard is in the runner, where run_powershell refuses to launch an
+    # uncontained shell. No automatic installation.
+    pwsh = config.resolve_powershell()
 
     print(f"Reaper-AI {__version__}")
     print(f"  GUI:          {url}")
     print(f"  Data:         {data_dir}")
-    print(f"  Stage runner: {runner_script}" + ("" if runner_script.exists() and runner_py.exists()
-                                              else "  (NOT FOUND -- stages will fail)"))
+    print(f"  Stage runner: {runner_label}" + ("" if runner_ok else "  (NOT FOUND -- stages will fail)"))
+    print(f"  PowerShell:   {pwsh if pwsh else 'NOT FOUND -- stages that run commands will fail'}")
     print(f"  Ollama:       {config.ollama_url()}" + ("" if _port_open(o_host, o_port, 1.0)
                                                     else "  (not reachable)"))
+    if not pwsh:
+        print("\nWARNING: no regular (non-packaged) PowerShell 7 was found. The Microsoft\n"
+              "Store/MSIX PowerShell is not used because it escapes the Windows job object\n"
+              "(abort/watchdog could leave shell processes running). Install PowerShell 7:\n"
+              "    winget install --id Microsoft.PowerShell --source winget\n"
+              "Until then, commands via run_powershell will fail with a clear error; the\n"
+              "server, the GUI and reaper-ai --version/--help work regardless.",
+              file=sys.stderr)
 
     pid_path = data_dir / PID_FILE
     pid_path.write_text(json.dumps({"pid": os.getpid(), "host": host, "port": port, "url": url}),
@@ -232,7 +254,7 @@ def cmd_migrate(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="reaper-ai", description="Reaper-AI: local chat GUI for the stage runner.")
+    p = argparse.ArgumentParser(prog="reaper-ai", description="Reaper-AI: local chat GUI with integrated stage runner.")
     p.add_argument("--version", action="version", version=f"reaper-ai {__version__}")
     sub = p.add_subparsers(dest="command", required=True)
 
@@ -245,7 +267,6 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--host", help=f"bind address (default {config.DEFAULT_HOST})")
     run.add_argument("--port", type=int, help=f"port (default {config.DEFAULT_PORT})")
     run.add_argument("--ollama-url", help=f"Ollama endpoint (default {config.DEFAULT_OLLAMA_URL})")
-    run.add_argument("--runner-dir", help=f"directory of stage_runner.py (default {config.DEFAULT_RUNNER_DIR})")
     run.add_argument("--no-browser", action="store_true", help="do not open the browser automatically")
     run.set_defaults(func=cmd_run)
 
