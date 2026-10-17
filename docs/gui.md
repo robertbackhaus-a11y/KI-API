@@ -5,7 +5,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 
 # Chat GUI
 
-Status: version 0.2.0. Source: `src/reaper_ai/web/index.html` (a single file,
+Status: version 0.2.1. Source: `src/reaper_ai/web/index.html` (a single file,
 vanilla JavaScript, no build step, no framework). The GUI only talks to the
 endpoints from [api.md](api.md) and knows nothing about `stage_runner.py`, Ollama
 or Basic Memory. GUI texts are in English; messages and answers are shown in the

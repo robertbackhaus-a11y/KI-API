@@ -10,6 +10,18 @@ SPDX-License-Identifier: GPL-3.0-or-later
 **Installation:** `pip install git+https://github.com/robertbackhaus-a11y/Reaper-AI.git` (binding standard, see rule 11)  
 **Architecture:** Local single-user system
 
+## Release v0.2.1 (released 2026-10-17)
+
+Patch release, annotated tag `v0.2.1` on `master`, GitHub Release with wheel and
+sdist attached (no PyPI). Install with
+`pip install git+https://github.com/robertbackhaus-a11y/Reaper-AI.git@v0.2.1`
+or `uv pip install git+https://github.com/robertbackhaus-a11y/Reaper-AI.git@v0.2.1`.
+
+- **R10 – Basic Memory with uv:** `basic-memory` pins the FastMCP pre-release
+  `fastmcp==4.0.0b1`; `fastmcp`/`fastmcp-slim` are now direct dependencies
+  (`>=4.0.0b1,<5`), so uv installs Basic Memory without `--prerelease=allow`.
+  pip installs are unchanged. No functional code changes.
+
 ## Release v0.2.0 (released 2026-10-17)
 
 Version `0.2.0` (single version source `src/reaper_ai/__init__.py`), annotated tag
@@ -42,7 +54,7 @@ Highlights since v0.1.0:
 8. Implement changes separately per work package. Do not commit, push or deploy automatically.
 9. Observe copyright and SPDX headers in new source files.
 10. No unnecessary refactoring.
-11. **Binding installation method:** users install Reaper-AI only with `pip install git+https://github.com/robertbackhaus-a11y/Reaper-AI.git`, releases via their Git tag (`…Reaper-AI.git@v0.2.0`), and start it with `reaper-ai run`. No PyPI, no manual checkout, no `pip install -e .` for users (editable installs are for development only). The GitHub installation must stay complete: every package file (stage runner, GUI, `web/vendor/`, license texts) is tracked in Git and declared as package data, and every release is tested with `pip install git+…@<tag>` in a fresh venv.
+11. **Binding installation method:** users install Reaper-AI only with `pip install git+https://github.com/robertbackhaus-a11y/Reaper-AI.git`, releases via their Git tag (`…Reaper-AI.git@v0.2.1`), and start it with `reaper-ai run`. No PyPI, no manual checkout, no `pip install -e .` for users (editable installs are for development only). The GitHub installation must stay complete: every package file (stage runner, GUI, `web/vendor/`, license texts) is tracked in Git and declared as package data, and every release is tested with `pip install git+…@<tag>` in a fresh venv.
 
 ## Development Guidelines
 
@@ -128,6 +140,7 @@ The former standalone runner `C:\tools\stage-runner\stage_runner.py` (B07 versio
 | R07 | Tested: editable install, fresh wheel in a fresh venv, all regression suites, new integration suite (fake Ollama + real subprocesses/pwsh/Basic Memory), real Ollama stages | done |
 | R08 | PowerShell process containment: the packaged (Store/MSIX) PowerShell 7 does not inherit the stage job object (verified at the process-tree level — both the WindowsApps alias and the direct package path break out; it is a property of the packaged build, not the alias), so its pwsh processes survived abort/watchdog. Fix: a regular, non-packaged PowerShell 7 is required; `config.resolve_powershell()` returns `REAPER_PWSH` (only if non-packaged) → regular PowerShell 7 (`C:\Program Files\PowerShell\7` or `%LOCALAPPDATA%\Programs\PowerShell\7`), with **no** fallback to the packaged build and **no** fallback to Windows PowerShell 5.1. If none is found, `run_powershell` returns a clear error and starts no shell (no uncontained process), and `reaper-ai run`/the API lifespan warn with the install command. Also fixed: `run_powershell`'s default working directory is now `<data-dir>/workspace` (`REAPER_WORKDIR`), not the data directory. Windows job objects, abort/watchdog, suspended start and B07 unchanged; nothing auto-installed. | done — verified end-to-end with the installed regular PowerShell 7.6.7 (`C:\Program Files\PowerShell\7\pwsh.exe`): integration suite 28/28 (A2/A3 kill real pwsh-7 child **and** grandchild + 4 R08 checks), all regression suites green; see `docs/architecture.md`, `docs/operations.md` |
 | R09 | PowerShell 7 is a verified installation requirement: `reaper-ai run` checks for a non-packaged PowerShell 7 at startup and prints the `winget install --id Microsoft.PowerShell` command if missing; `pip install git+…`, `reaper-ai --version` and `--help` work without it (checked only at run start / before shell execution). No silent fallback to Store/MSIX or Windows PowerShell 5.1; no automatic installation. | done (see `docs/operations.md`; tested with and without a suitable PowerShell 7) |
+| R10 | Basic Memory installs automatically with both pip and uv, without resolver flags: `basic-memory` 0.23.2 pins the pre-release `fastmcp==4.0.0b1` (→ `fastmcp-slim==4.0.0b1`), which pip accepts (exact pin) but uv rejects for transitive dependencies (v0.2.0: `uv pip install` failed without `--prerelease=allow`). Fix: `fastmcp>=4.0.0b1,<5` and `fastmcp-slim>=4.0.0b1,<5` as direct dependencies in `pyproject.toml` (exact pins in `requirements.txt`); `basic-memory` stays a required dependency, its version range and FastMCP choice unchanged. | done — tested in fresh Python 3.12 venvs: `pip install git+…` (local test clone) and `uv pip install` (checkout, wheel, sdist) each install `basic-memory` 0.23.2 / `fastmcp` 4.0.0b1, imports OK, integration suite 28/28 incl. real Basic Memory calls with both installed interpreters |
 
 **Acceptance:** functional parity with the standalone runner, no runner import in the API process, all regression tests green.
 

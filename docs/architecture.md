@@ -5,7 +5,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 
 # Architecture
 
-Status: version 0.2.0 + integrated stage runner. Target architecture v1 (see the
+Status: version 0.2.1 + integrated stage runner. Target architecture v1 (see the
 coding-v2 decision_record).
 
 ## Components

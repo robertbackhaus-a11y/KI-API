@@ -22,6 +22,12 @@ dependencies = [
     # Stage runner memory tools. The runner uses Basic Memory's internal client API
     # (mcp.clients, note_content_materialization) -- pinned to the tested minor line.
     "basic-memory>=0.23.2,<0.24",
+    # basic-memory 0.23.2 pins the pre-releases fastmcp==4.0.0b1 (-> fastmcp-slim==4.0.0b1).
+    # uv only accepts pre-releases that a first-party requirement names explicitly, so
+    # declare both here (bounds only, the exact version stays basic-memory's choice);
+    # otherwise `uv pip install` fails without --prerelease=allow.
+    "fastmcp>=4.0.0b1,<5",
+    "fastmcp-slim>=4.0.0b1,<5",
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",

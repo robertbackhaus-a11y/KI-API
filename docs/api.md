@@ -5,7 +5,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 
 # HTTP API
 
-Status: version 0.2.0. Source: `src/reaper_ai/main.py`.
+Status: version 0.2.1. Source: `src/reaper_ai/main.py`.
 
 Local single-user system, loopback only, no authentication. No OpenAPI schema, no
 `/docs` or `/redoc` page (deliberately disabled). Default address:

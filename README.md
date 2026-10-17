@@ -12,7 +12,7 @@ Reaper's only chat channel: Ollama serves the main model (`qwen3.8-q5:latest`,
 full REAPER persona) and the fast model for subtasks delegated via `run_substage`
 (`qwen3:8b`).
 
-Status: version 0.2.0. Open and completed work packages are listed in
+Status: version 0.2.1. Open and completed work packages are listed in
 [ROADMAP.md](ROADMAP.md).
 
 ## Features
@@ -40,12 +40,13 @@ The official and only supported installation is `pip` directly from GitHub:
 
 A specific release is installed via its Git tag:
 
-    pip install git+https://github.com/robertbackhaus-a11y/Reaper-AI.git@v0.2.0
+    pip install git+https://github.com/robertbackhaus-a11y/Reaper-AI.git@v0.2.1
 
 This installs everything: FastAPI layer, integrated stage runner, chat GUI with
 its bundled libraries and license files, and all dependencies (incl.
-`basic-memory`). Reaper-AI is not published on PyPI; a manual checkout or
-`pip install -e .` is only for development (see
+`basic-memory`). `uv pip install git+…` works the same way, without
+`--prerelease=allow` (since v0.2.1). Reaper-AI is not
+published on PyPI; a manual checkout or `pip install -e .` is only for development (see
 [docs/operations.md](docs/operations.md)). Requires Python ≥ 3.12, Git on `PATH`
 and a running Ollama. Running shell commands additionally requires a regular,
 non-packaged **PowerShell 7** (`winget install --id Microsoft.PowerShell`); the

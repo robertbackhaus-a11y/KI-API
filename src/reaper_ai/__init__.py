@@ -3,4 +3,4 @@
 
 """Reaper-AI: local chat GUI + FastAPI layer + integrated stage runner (reaper_ai.runner)."""
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"

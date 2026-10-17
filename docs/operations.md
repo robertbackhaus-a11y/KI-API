@@ -5,7 +5,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 
 # Installation, CLI and Configuration
 
-Status: version 0.2.0 + integrated stage runner. Sources: `src/reaper_ai/cli.py`,
+Status: version 0.2.1 + integrated stage runner. Sources: `src/reaper_ai/cli.py`,
 `src/reaper_ai/config.py`, `src/reaper_ai/runner/stage_runner.py`, `pyproject.toml`,
 `run.ps1`, `stop.ps1`.
 
@@ -25,8 +25,12 @@ Status: version 0.2.0 + integrated stage runner. Sources: `src/reaper_ai/cli.py`
 - Python dependencies, installed with the package (pinned versions in
   `requirements.txt`): `fastapi`, `uvicorn`, and for the stage runner `requests`
   and `basic-memory` (`>=0.23.2,<0.24`, because the runner uses Basic Memory's
-  internal client API). Basic Memory keeps its configuration and projects in the
-  user profile (`~/.basic-memory`), so all installations of the same user share
+  internal client API). `basic-memory` 0.23.2 itself pins the FastMCP
+  pre-release `fastmcp==4.0.0b1` (which pins `fastmcp-slim==4.0.0b1`), so
+  `pyproject.toml` also lists `fastmcp` and `fastmcp-slim` (`>=4.0.0b1,<5`) as
+  direct dependencies: uv only accepts a pre-release that a first-party
+  requirement names explicitly. Basic Memory keeps its configuration and
+  projects in the user profile (`~/.basic-memory`), so all installations of the same user share
   the same memory projects.
 - No separate stage-runner directory or venv any more: the runner is part of the
   package and runs with the same interpreter as the API.
@@ -40,13 +44,13 @@ repository:
 
 A specific release is installed via its Git tag (`@<tag>`):
 
-    pip install git+https://github.com/robertbackhaus-a11y/Reaper-AI.git@v0.2.0
+    pip install git+https://github.com/robertbackhaus-a11y/Reaper-AI.git@v0.2.1
 
 Without a tag, the current `master` is installed. Recommended is a dedicated
 venv, e.g.:
 
     py -3.12 -m venv C:\tools\reaper-ai-venv
-    C:\tools\reaper-ai-venv\Scripts\pip install git+https://github.com/robertbackhaus-a11y/Reaper-AI.git@v0.2.0
+    C:\tools\reaper-ai-venv\Scripts\pip install git+https://github.com/robertbackhaus-a11y/Reaper-AI.git@v0.2.1
     C:\tools\reaper-ai-venv\Scripts\reaper-ai run
 
 The installation is complete; nothing has to be copied or checked out by hand:
@@ -59,6 +63,11 @@ The installation is complete; nothing has to be copied or checked out by hand:
 - all Python dependencies from `pyproject.toml` (`fastapi`, `uvicorn`,
   `requests`, `basic-memory`),
 - the console command `reaper-ai`.
+
+`uv pip install git+https://github.com/robertbackhaus-a11y/Reaper-AI.git[@<tag>]`
+into a uv venv installs the same set, including `basic-memory`; no
+`--prerelease=allow` or other resolver flag is needed (fixed in v0.2.1; v0.2.0
+still fails under uv because of `basic-memory`'s `fastmcp==4.0.0b1` pin).
 
 Rules:
 
@@ -75,7 +84,7 @@ Rules:
 
 ### Updating and switching versions
 
-    pip install git+https://github.com/robertbackhaus-a11y/Reaper-AI.git@v0.2.0
+    pip install git+https://github.com/robertbackhaus-a11y/Reaper-AI.git@v0.2.1
 
 installs the given release over the existing one. pip only replaces an installed
 package when the version number differs: reinstalling the same version (e.g. the
