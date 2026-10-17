@@ -87,14 +87,21 @@ SESSIONS_DIR = APP_DIR / "sessions"
 TASK_TMP_DIR = APP_DIR / "tasks"  # Temp-Taskdateien fuer --task @datei (Windows-argv-Limit)
 
 # Stage-Runner: bestehender Code, eigene venv, eigenes Verzeichnis -- nur als Subprozess.
+# Per Env-Var ueberschreibbar NUR fuer Regressionstests (test-queue/), damit sie einen
+# Fake-Runner statt des echten stage_runner.py/Ollama verwenden koennen; Produktions-
+# Default (keine Env-Vars gesetzt) ist unveraendert exakt wie vorher.
 STAGE_RUNNER_DIR = Path(r"C:\tools\stage-runner")
-STAGE_PYTHON = STAGE_RUNNER_DIR / ".venv" / "Scripts" / "python.exe"
-STAGE_RUNNER = STAGE_RUNNER_DIR / "stage_runner.py"
+STAGE_PYTHON = Path(os.environ["REAPER_STAGE_PYTHON"]) if os.environ.get("REAPER_STAGE_PYTHON") \
+    else STAGE_RUNNER_DIR / ".venv" / "Scripts" / "python.exe"
+STAGE_RUNNER = Path(os.environ["REAPER_STAGE_RUNNER_SCRIPT"]) if os.environ.get("REAPER_STAGE_RUNNER_SCRIPT") \
+    else STAGE_RUNNER_DIR / "stage_runner.py"
 
 # API-Watchdog: bewusst GROSSER als die interne Wall-Clock-Notbremse des Runners
 # (20 min), damit eine normale Stage immer zuerst selbst endet (rc=2); feuert nur bei
 # echtem Hang und beendet seither den Prozessbaum AKTIV (P4, Job-Object).
-STAGE_TIMEOUT_S = 25 * 60
+# Per Env-Var verkuerzbar NUR fuer Regressionstests (test-queue/test_live_api.py,
+# Watchdog-unter-voller-Queue-Fall) -- ohne die Variable unveraendert 25 min.
+STAGE_TIMEOUT_S = int(os.environ.get("REAPER_STAGE_TIMEOUT_S", str(25 * 60)))
 
 # Wie lange POST /abort auf die Finalisierung des Kills wartet, bevor es mit 500 antwortet.
 # Normal: Kill + Reap + Pipe-Drain-Ende + JSONL-Event dauern deutlich unter einer Sekunde.
@@ -106,6 +113,16 @@ TAIL_LIMIT = 8 * 1024
 # P5: Herzschlag-Intervall des SSE-Streams (Stage laeuft sonst bis zu 20 min;
 # das Event haelt den Stream sichtbar live und beweist Fortschritt an den Client).
 HEARTBEAT_INTERVAL_S = 5.0
+
+# Begrenzte SSE-Event-Queue (P1-Fix): bei einem langsamen/getrennten Client UND
+# gleichzeitig hohem Logaufkommen (z. B. eine Stage mit vielen Tool-Calls) wuchs
+# die vorher unbegrenzte queue.Queue() ohne Obergrenze -- log_line-Events werden
+# jetzt bei Ueberlast verworfen (gezaehlt, am Stage-Ende als ein log_dropped-Event
+# gemeldet), stage_started/stage_completed/Sentinel werden GARANTIERT zugestellt
+# (verdraengen notfalls aeltere log_line-Eintraege). 1000 Eintraege ~ mehrere
+# Minuten normaler Log-Rate bei 5-10 Zeilen/s -- grosszuegig genug fuer kurze
+# Verzoegerungen, klein genug um den Speicher pro Stage hart zu begrenzen.
+SSE_QUEUE_MAXSIZE = 1000
 
 # Request-Defaults: lokal vorhandene Ollama-Modelle (verifiziert 2026-10-15: qwen3:8b
 # 8.2B Q4_K_M und qwen3.8-q5 27.3B Q5_K_M; das qwen36-a3b:latest aus dem Runner-Beispiel
@@ -121,6 +138,15 @@ EXIT_OUTCOMES = {0: "success", 1: "error", 2: "wall_clock", 3: "max_iterations"}
 # Status fuer aktiv beendete Stages (kein Runner-Urteil -> exit_code bleibt null):
 STATUS_ABORTED = "aborted"            # vom Nutzer ueber POST /abort abgebrochen
 STATUS_WATCHDOG = "watchdog_timeout"  # API-Watchdog hat die Stage beendet
+
+# Race-Fix (P1): Sentinel-Wert fuer _kill_intent[session_id] -- markiert den
+# LINEARISIERUNGSPUNKT zwischen natuerlichem Prozessende und Abbruch (siehe
+# _finalize_stage/_terminate_live_stage). _kill_intent dient damit nicht mehr
+# nur als "welcher Abbruchgrund", sondern als EINZIGE verbindliche Entscheidung:
+# None = noch offen, _NATURAL = natuerliches Ende hat den Punkt zuerst erreicht
+# (ein danach eintreffender Abort kommt zu spaet), jeder andere String = ein
+# Abbruchgrund hat den Punkt zuerst erreicht (erster Abbruchgrund gewinnt).
+_NATURAL = "__natural_completion__"
 
 CREATE_NO_WINDOW = 0x08000000  # Windows: kein Konsolenfenster (wie der Runner bei pwsh)
 
@@ -340,7 +366,7 @@ class LiveStage:
     abort_event und wartet auf done_event -- so bleibt die JSONL-Reihenfolge
     stage_started/stage_completed unveraendert.
     """
-    __slots__ = ("stage_id", "proc", "job_handle", "abort_event", "done_event")
+    __slots__ = ("stage_id", "proc", "job_handle", "abort_event", "done_event", "job_closed")
 
     def __init__(self, stage_id: str, proc: subprocess.Popen, job_handle: int) -> None:
         self.stage_id = stage_id
@@ -348,6 +374,11 @@ class LiveStage:
         self.job_handle = job_handle
         self.abort_event = threading.Event()  # /abort -> Worker: bitte beenden
         self.done_event = threading.Event()   # Worker -> /abort: finalisiert + persistiert
+        # Race-Fix (P1, Punkt A): schuetzt vor TerminateJobObject() auf einem
+        # bereits geschlossenen Handle. NUR unter _live_guard lesen/setzen (siehe
+        # _kill_job_locked/_close_job_handle_locked) -- dadurch sind Terminierung
+        # und Handle-Schliessung gegenseitig ausgeschlossen, nie gleichzeitig.
+        self.job_closed = False
 
 
 # Laufzeit-Zustand: In-Memory-Index der persistierten Sessions; wird beim Start
@@ -468,8 +499,113 @@ class MessageIn(BaseModel):
         return v
 
 
+class BoundedSseQueue:
+    """Begrenzte SSE-Event-Queue mit zwei Zustellklassen:
+
+    - log_line (ueber put_log_line): best-effort, NIE blockierend. Bei voller
+      Queue wird die Zeile verworfen und nur gezaehlt (kein queue.put() mit
+      unbegrenzter Wartezeit, kein Einzel-Warning pro Zeile -- Anforderung 3/4).
+      Der stderr-Drainer (_drain_capped) bleibt dadurch immer lauffaehig, auch
+      wenn der SSE-Client nicht konsumiert; die stderr-Pipe wird unabhaengig
+      vom Consumer weiter geleert (kein Pipe-Deadlock-Risiko).
+    - Prioritaet (ueber put_priority): stage_started/stage_completed/Sentinel
+      MUESSEN ankommen -- bei voller Queue wird GEZIELT ein log_line-Eintrag
+      verdraengt, NIE ein anderes Prioritaets-Event. Blockiert dabei NIE
+      unbegrenzt, da die Queue stets endlich ist und verdraengt statt zu warten.
+
+    KORREKTUR (gefunden durch gezielten Test, siehe test_bounded_queue.py
+    test_priority_eviction_never_removes_priority_event): die urspruengliche
+    Fassung verdraengte blind den AELTESTEN Eintrag, egal welchen Typs. Da
+    stage_started IMMER als erstes Element eingereiht wird (_start_stage, vor
+    den Drainer-Threads), ist es bei einer spaeter voll gelaufenen Queue exakt
+    der aelteste Eintrag -- ein nachfolgender put_priority(stage_completed)
+    haette stage_started dadurch VERDRAENGT statt eines log_line-Eintrags.
+    _evict_one_log_line_locked() sucht deshalb gezielt den ersten log_line-
+    Eintrag (reiht uebersprungene Nicht-log_line-Eintraege in Original-
+    reihenfolge wieder ein) statt blind das Kopfelement zu entfernen.
+
+    Alle mutierenden Operationen (put_log_line, put_priority/Verdraengung,
+    Dropped-Zaehler) laufen unter EINEM gemeinsamen Lock, damit die Verdraengung
+    (mehrschrittig: Queue durchsuchen, Nicht-Opfer wieder einreihen) atomar
+    gegenueber anderen Producern ist -- sonst koennte ein paralleler
+    put_log_line()-Aufruf mitten in der Suche einen weiteren Eintrag einfuegen
+    und das Ergebnis verfaelschen. get() (Consumer-Seite) bleibt lockfrei,
+    queue.Queue ist dafuer bereits intern threadsicher; die Verdraengung ist mit
+    maxsize=1000 ein kurzer, begrenzter Scan (Mikrosekunden), kein
+    unbegrenztes Warten."""
+
+    __slots__ = ("_q", "_dropped", "_lock")
+
+    def __init__(self, maxsize: int = SSE_QUEUE_MAXSIZE) -> None:
+        self._q: queue.Queue = queue.Queue(maxsize=maxsize)
+        self._dropped = 0
+        self._lock = threading.Lock()
+
+    def put_log_line(self, data: dict) -> None:
+        with self._lock:
+            try:
+                self._q.put_nowait(("log_line", data))
+            except queue.Full:
+                self._dropped += 1
+
+    def put_priority(self, item: tuple[str, dict] | None) -> None:
+        with self._lock:
+            while True:
+                try:
+                    self._q.put_nowait(item)
+                    return
+                except queue.Full:
+                    if not self._evict_one_log_line_locked():
+                        # Praktisch unerreichbar: pro Stage gibt es hoechstens 4
+                        # Prioritaets-Events (stage_started, log_dropped,
+                        # stage_completed, Sentinel) bei maxsize=1000 -- es gibt
+                        # also immer mindestens einen log_line-Eintrag zum
+                        # Verdraengen. Letzter Ausweg (z. B. bei absichtlich
+                        # winziger maxsize in einem Test), damit put_priority()
+                        # NIE blockiert: aeltesten Eintrag verdraengen.
+                        try:
+                            self._q.get_nowait()
+                        except queue.Empty:
+                            pass
+
+    def _evict_one_log_line_locked(self) -> bool:
+        """Aufrufer haelt bereits self._lock. Sucht vom Kopf der Queue aus den
+        ERSTEN log_line-Eintrag und entfernt NUR diesen; alle dabei
+        uebersprungenen Nicht-log_line-Eintraege (stage_started etc.) werden in
+        urspruenglicher Reihenfolge wieder eingereiht. True, wenn ein
+        log_line-Eintrag entfernt wurde (Platz gemacht), sonst False."""
+        held: list = []
+        found = False
+        while True:
+            try:
+                old = self._q.get_nowait()
+            except queue.Empty:
+                break
+            if not found and old is not None and old[0] == "log_line":
+                found = True
+                self._dropped += 1
+                continue  # NICHT wieder einreihen -- das macht den Platz frei
+            held.append(old)
+        for h in held:
+            self._q.put_nowait(h)  # passt immer wieder rein -- wir haben max. 1 entfernt
+        return found
+
+    def pop_dropped(self) -> int:
+        """Liefert die Anzahl seit dem letzten Aufruf verworfener log_line-Events
+        und setzt den Zaehler zurueck -- fuer das optionale log_dropped-Event."""
+        with self._lock:
+            n = self._dropped
+            self._dropped = 0
+            return n
+
+    def get(self, timeout: float):
+        """Wie queue.Queue.get(timeout=...): blockiert bis Item oder wirft
+        queue.Empty nach Ablauf -- unveraendertes Consumer-Verhalten."""
+        return self._q.get(timeout=timeout)
+
+
 def _drain_capped(stream, chunks: list[bytes], limit: int,
-                   events: queue.Queue | None = None) -> None:
+                   events: "BoundedSseQueue | None" = None) -> None:
     """Leert eine Pipe DURCHGAENGIG waehrend der Subprozess laeuft (voller Puffer =
     Deadlock) und haelt nur die letzten `limit` Bytes (Tail) fuer Event/Response).
     Mit `events`: pusht zusaetzlich JEDE vollstaendige Zeile SOFORT als eigenes
@@ -498,7 +634,7 @@ def _drain_capped(stream, chunks: list[bytes], limit: int,
                     line, buf = buf.split(b"\n", 1)
                     text = line.decode("utf-8", errors="replace").rstrip("\r")
                     if text:
-                        events.put(("log_line", {"text": text}))
+                        events.put_log_line({"text": text})
     except Exception as exc:
         log.warning("Pipe-Drain unterbrochen: %s", exc)
     finally:
@@ -559,23 +695,60 @@ def _kill_job(job_handle: int) -> None:
                     ctypes.get_last_error())
 
 
+def _kill_job_locked(live: "LiveStage") -> None:
+    """Race-Fix (P1, Punkt A): Aufrufer MUSS bereits _live_guard halten. Ruft
+    TerminateJobObject nur auf, wenn das Handle noch nicht geschlossen wurde --
+    verhindert, dass ein Kill auf ein bereits (von _finalize_stage) geschlossenes
+    Handle trifft (Use-after-close/Handle-Reuse). Da sowohl diese Funktion als
+    auch _close_job_handle_locked() ausschliesslich unter _live_guard laufen,
+    sind Terminierung und Schliessen des Handles gegenseitig ausgeschlossen."""
+    if live.job_closed:
+        return
+    _kill_job(live.job_handle)
+
+
+def _close_job_handle_locked(live: "LiveStage") -> None:
+    """Race-Fix (P1, Punkt A): Aufrufer MUSS bereits _live_guard halten. Schliesst
+    das Handle hoechstens einmal (job_closed-Flag) -- danach kann _kill_job_locked
+    nie wieder auf dieses Handle zugreifen, egal welcher Thread als naechstes
+    _live_guard bekommt."""
+    if live.job_closed:
+        return
+    _close_job_handle(live.job_handle)
+    live.job_closed = True
+
+
 def _terminate_live_stage(session_id: str, status: str) -> LiveStage | None:
     """Der EINZIGE Weg, eine laufende Stage zu toeten -- POST /abort UND
-    Watchdog nutzen exakt diesen Mechanismus: kill-intent + abort_event setzen
-    (unter _live_guard, VOR dem Kill), dann Job-Object beenden. Liefert die
-    LiveStage oder None, wenn keine aktive Stage existiert (idempotent).
+    Watchdog nutzen exakt diesen Mechanismus. Liefert die LiveStage oder None,
+    wenn keine aktive Stage existiert ODER das natuerliche Ende den
+    Linearisierungspunkt bereits zuerst erreicht hat (Punkt C, zu spaet).
 
-    Rule A: Einmal angerufen, gewinnt der Abbruch-Wunsch auch im Sub-Sekunden-
-    Rennen gegen eine Natural-Completion -- der Worker persistiert dann
-    exit_code=null mit dem hier gesetzten Status."""
+    Race-Fix (P1): kill-intent setzen, abort_event setzen UND der eigentliche
+    Kill (_kill_job_locked) laufen jetzt alle unter DEMSELBEN _live_guard-Aufruf
+    -- vorher lag der Kill ausserhalb des Locks und konnte mit einem parallelen
+    _close_job_handle() in _finalize_stage um das Handle wettlaufen (Punkt A,
+    Use-after-close/Handle-Reuse). _kill_intent ist jetzt die EINZIGE
+    verbindliche Entscheidung (siehe _NATURAL/_finalize_stage):
+    - bereits _NATURAL: natuerliches Ende hat den Linearisierungspunkt zuerst
+      erreicht -- Abort kommt zu spaet, Ergebnis bleibt unveraendert (Punkt C).
+      Kein Kill noetig, der Prozess ist bereits (per _wait_proc bestaetigt) tot.
+    - bereits ein anderer Status: ein frueherer Abbruchgrund hat gewonnen
+      (Punkt B, erster gewinnt) -- wir ueberschreiben ihn NICHT, setzen
+      abort_event/Kill aber trotzdem erneut (idempotent, schadet nicht, falls
+      der erste Versuch den Prozess noch nicht erreicht hat).
+    - None (offen): wir sind die ersten -- unser `status` gewinnt verbindlich."""
     with _live_guard:
         live = _live_stages.get(session_id)
         if live is None:
             return None
-        _kill_intent[session_id] = status
+        existing = _kill_intent.get(session_id)
+        if existing == _NATURAL:
+            return None
+        if existing is None:
+            _kill_intent[session_id] = status
         live.abort_event.set()
-        job_handle = live.job_handle
-    _kill_job(job_handle)
+        _kill_job_locked(live)
     return live
 
 
@@ -738,7 +911,7 @@ def _build_task_text(session: dict, message: str) -> str:
 
 
 def _start_stage(session_id: str, body: MessageIn,
-                  events: queue.Queue) -> tuple[StageContext, dict]:
+                  events: BoundedSseQueue) -> tuple[StageContext, dict]:
     """P5-Startphase -- die bisherige _run_stage-Logik BIS VOR die Warte- und
     Finalisierungsphase, 1:1 unveraendert: Task-Tempdatei, Kill-Job, Subprozess,
     LiveStage-Registry, stage_record + JSONL-Events (message_received,
@@ -837,7 +1010,7 @@ def _start_stage(session_id: str, body: MessageIn,
             "pid": proc.pid, "model": body.model, "project": body.project,
             "started_at": started_at,
         }
-        events.put(("stage_started", started_data))
+        events.put_priority(("stage_started", started_data))
 
         # stdout/stderr DURCHGAENGIG leeren (voller Pipe-Puffer = Deadlock), Tails behalten.
         drainers = [
@@ -853,14 +1026,18 @@ def _start_stage(session_id: str, body: MessageIn,
         watchdog.start()
     except Exception:
         # Startphase unvollstaendig (extrem unwahrscheinlich): Gleiche Aufraeum- und
-        # Persistenzregeln wie die Fehlerklappe der Finalisierungsphase.
+        # Persistenzregeln wie die Fehlerklappe der Finalisierungsphase (Race-Fix
+        # P1: _kill_intent-basierte Entscheidung statt nur abort_event, Handle-
+        # Schliessen unter demselben Lock wie ein moeglicher Kill-Versuch).
         log.exception("Startphase der Stage %s (Session %s) fehlgeschlagen",
                       stage_id, session_id)
         with _live_guard:
-            if live.abort_event.is_set():
-                fail_status = _kill_intent.pop(session_id, None) or STATUS_ABORTED
-            else:
-                fail_status = "incomplete"
+            existing = _kill_intent.get(session_id)
+            fail_status = existing if existing not in (None, _NATURAL) else \
+                (STATUS_ABORTED if live.abort_event.is_set() else "incomplete")
+            _close_job_handle_locked(live)
+            _live_stages.pop(session_id, None)
+            _kill_intent.pop(session_id, None)
         stage_record.update({
             "status": fail_status, "exit_code": None, "finished_at": _utcnow(),
             "duration_s": round(time.monotonic() - start_mono, 1),
@@ -877,11 +1054,7 @@ def _start_stage(session_id: str, body: MessageIn,
         except Exception:
             log.exception("stage_completed nach Startfehler nicht persistierbar (Session %s)",
                           session_id)
-        with _live_guard:
-            _live_stages.pop(session_id, None)
-            _kill_intent.pop(session_id, None)
         _delete_quiet(task_path)
-        _close_job_handle(job_handle)  # KILL_ON_JOB_CLOSE: toetet den Prozessbaum
         live.done_event.set()
         raise
 
@@ -903,7 +1076,6 @@ def _finalize_stage(ctx: StageContext) -> dict:
     session_id = ctx.session_id
     stage_id = ctx.stage_id
     proc = ctx.proc
-    job_handle = ctx.job_handle
     live = ctx.live
     body = ctx.body
     start_mono = ctx.start_mono
@@ -918,6 +1090,31 @@ def _finalize_stage(ctx: StageContext) -> dict:
     try:
         rc = _wait_proc(proc, session_id, deadline)
 
+        # LINEARISIERUNGSPUNKT (Punkt C): rc ist jetzt bekannt -- der Prozess hat
+        # sich beendet, so oder so. Die Frage "hat vorher schon jemand einen
+        # Abbruch registriert" wird HIER, unter _live_guard, EIN EINZIGES MAL
+        # verbindlich entschieden -- derselbe Lock, den auch _terminate_live_stage
+        # fuer seine Pruefung/Registrierung verwendet, macht die beiden Seiten
+        # gegenseitig exklusiv: wer zuerst den Lock bekommt, gewinnt.
+        # - _kill_intent noch leer (None): WIR sind zuerst da -- natuerliches
+        #   Ende gewinnt verbindlich, mit _NATURAL markieren, damit ein jetzt
+        #   noch eintreffender Abort zu spaet ist und nichts mehr aendert.
+        # - _kill_intent traegt schon einen Abbruchgrund: der wurde VOR diesem
+        #   Punkt registriert -- Rule A, Abbruch gewinnt (status uebernehmen).
+        # _kill_intent wird hier bewusst NOCH NICHT entfernt (siehe unten) --
+        # sonst koennte ein Abort, der genau in diesem Moment durchkommt, faelsch-
+        # lich glauben, er sei der erste, weil der Registry-Eintrag (_live_stages)
+        # erst spaeter (nach der Persistenz) entfernt wird.
+        with _live_guard:
+            existing = _kill_intent.get(session_id)
+            if existing is None:
+                _kill_intent[session_id] = _NATURAL
+                aborted = False
+                status = None
+            else:
+                aborted = existing != _NATURAL  # _NATURAL kann hier nie vorkommen, defensiv
+                status = existing if aborted else None
+
         for t in drainers:
             t.join(timeout=5)
         stdout_tail = b"".join(out_chunks).decode("utf-8", errors="replace")
@@ -927,9 +1124,6 @@ def _finalize_stage(ctx: StageContext) -> dict:
         finished_at = _utcnow()
         duration_s = round(time.monotonic() - start_mono, 1)
 
-        with _live_guard:
-            aborted = live.abort_event.is_set()
-            status = _kill_intent.pop(session_id, None) if aborted else None
         if aborted:
             # Rule A: Abbruch-Wunsch gewinnt; exit_code bleibt null (kein Runner-Urteil).
             status = status or STATUS_ABORTED
@@ -955,9 +1149,13 @@ def _finalize_stage(ctx: StageContext) -> dict:
         }))
 
         with _live_guard:
+            # Race-Fix (P1, Punkt A): Handle-Schliessen laeuft jetzt unter
+            # DEMSELBEN Lock wie jeder moegliche Kill-Versuch (_kill_job_locked)
+            # -- job_closed-Flag macht ein spaeteres TerminateJobObject auf
+            # diesem Handle unmoeglich, egal welcher Thread als naechstes dran ist.
+            _close_job_handle_locked(live)
             _live_stages.pop(session_id, None)
-            _kill_intent.pop(session_id, None)  # defensive (normal oben schon gepoppt)
-        _close_job_handle(job_handle)  # KILL_ON_JOB_CLOSE: raeumt verbliebene Baume auf
+            _kill_intent.pop(session_id, None)  # jetzt erst: _NATURAL oder Abbruchgrund entfernen
         live.done_event.set()
         log.info("Stage %s fertig: status=%s rc=%s nach %.1f s",
                  stage_id, status, exit_code, duration_s)
@@ -966,10 +1164,12 @@ def _finalize_stage(ctx: StageContext) -> dict:
         log.exception("Finalisierung der Stage %s (Session %s) fehlgeschlagen",
                       stage_id, session_id)
         with _live_guard:
-            if live.abort_event.is_set():
-                fail_status = _kill_intent.pop(session_id, None) or STATUS_ABORTED
-            else:
-                fail_status = "incomplete"
+            existing = _kill_intent.get(session_id)
+            fail_status = existing if existing not in (None, _NATURAL) else \
+                (STATUS_ABORTED if live.abort_event.is_set() else "incomplete")
+            _close_job_handle_locked(live)
+            _live_stages.pop(session_id, None)
+            _kill_intent.pop(session_id, None)
         try:
             fail_out = b"".join(out_chunks).decode("utf-8", errors="replace")
             fail_err = b"".join(err_chunks).decode("utf-8", errors="replace")
@@ -990,22 +1190,20 @@ def _finalize_stage(ctx: StageContext) -> dict:
                 "stdout_tail": fail_out, "stderr_tail": fail_err}))
         except Exception:
             log.exception("stage_completed nach Fehler nicht persistierbar (Session %s)", session_id)
-        with _live_guard:
-            _live_stages.pop(session_id, None)
-            _kill_intent.pop(session_id, None)
         _delete_quiet(task_path)
-        _close_job_handle(job_handle)  # toetet den verbliebene Prozessbaum
         live.done_event.set()
         raise
 
 
-def _stage_worker(ctx: StageContext, events: queue.Queue) -> None:
+def _stage_worker(ctx: StageContext, events: BoundedSseQueue) -> None:
     """P5-Worker-Thread (einer pro POST /messages): finalisiert die in der
     Startphase gestartete Stage und liefert das Ergebnis als Queue-Items an den
     SSE-Generator -- genau EIN Terminal-Event, danach der Sentinel. Laeuft OHNE
     Session-Lock; eine Client-Trennung aendert nichts am Runner-Lauf (die Stage
     laeuft weiter, Finalisierung/Persistenz unveraendert -- Abbruch bleibt
-    POST /abort)."""
+    POST /abort). Terminal-Event und Sentinel sind Prioritaets-Puts (BoundedSseQueue)
+    -- kommen garantiert an, auch wenn die Queue zwischenzeitlich voller log_line-
+    Events war (die werden dafuer notfalls verdraengt)."""
     try:
         result = _finalize_stage(ctx)
     except Exception:
@@ -1018,11 +1216,17 @@ def _stage_worker(ctx: StageContext, events: queue.Queue) -> None:
             "stage": next((s for s in _sessions[ctx.session_id]["stages"]
                            if s.get("stage_id") == ctx.stage_id), None) or {},
         }
-    events.put(("stage_completed", result["stage"]))
-    events.put(None)  # Sentinel: Stream-Ende
+    # Verworfene log_line-Events (Ueberlast) VOR dem Terminal-Event melden -- ein
+    # kompaktes Sammel-Event statt einer Warnung pro Zeile; rein informativ ueber
+    # verlorene LIVE-Sicht, niemals ueber das (immer vollstaendige) Stage-Ergebnis.
+    dropped = events.pop_dropped()
+    if dropped:
+        events.put_priority(("log_dropped", {"count": dropped}))
+    events.put_priority(("stage_completed", result["stage"]))
+    events.put_priority(None)  # Sentinel: Stream-Ende
 
 
-async def _sse_stream(events: queue.Queue, started_mono: float) -> AsyncIterator[str]:
+async def _sse_stream(events: BoundedSseQueue, started_mono: float) -> AsyncIterator[str]:
     """P5-Consumer-Seite des SSE-Streams: gibt die gepushten Events im
     Standard-SSE-Format aus (event/data/Rahmenende) und sendet, solange KEIN
     Event kommt (Stage laeuft), alle HEARTBEAT_INTERVAL_S ein heartbeat-Event.
@@ -1061,7 +1265,7 @@ def post_message(session_id: str, body: MessageIn) -> StreamingResponse:
     session = _sessions.get(session_id)
     if session is not None and _running_stage(session) is not None:
         raise HTTPException(status_code=409, detail="stage already running for this session")
-    events: queue.Queue = queue.Queue()
+    events = BoundedSseQueue()
     with lock:
         if _sessions.get(session_id) is None:
             raise HTTPException(status_code=404, detail="unknown session_id")
