@@ -8,6 +8,8 @@ SPDX-License-Identifier: GPL-3.0-or-later
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Reaper</title>
+<link rel="stylesheet" href="/vendor/hljs-github.min.css" media="not all and (prefers-color-scheme: dark)">
+<link rel="stylesheet" href="/vendor/hljs-github-dark.min.css" media="(prefers-color-scheme: dark)">
 <style>
   :root {
     --bg: #f5f5f3;
@@ -106,6 +108,30 @@ SPDX-License-Identifier: GPL-3.0-or-later
   .badge.error, .badge.wall_clock, .badge.max_iterations { color: var(--error); border-color: var(--error); }
   .badge.aborted, .badge.watchdog_timeout, .badge.incomplete { color: var(--warn); border-color: var(--warn); }
   .badge.running { color: var(--accent); border-color: var(--accent); }
+  /* Markdown-Darstellung der Stage-Antworten */
+  .msg .body.md { white-space: normal; display: block; overflow-wrap: anywhere; }
+  .md > :first-child { margin-top: 0; }
+  .md > :last-child { margin-bottom: 0; }
+  .md p, .md ul, .md ol, .md table, .md blockquote, .md .code-wrap { margin: 0 0 8px; }
+  .md h1, .md h2, .md h3, .md h4, .md h5, .md h6 { margin: 12px 0 6px; line-height: 1.3; }
+  .md h1 { font-size: 1.3em; } .md h2 { font-size: 1.18em; } .md h3 { font-size: 1.06em; }
+  .md h4, .md h5, .md h6 { font-size: 1em; }
+  .md ul, .md ol { padding-left: 1.4em; }
+  .md li > ul, .md li > ol { margin: 2px 0; }
+  .md a { color: var(--accent); }
+  .md blockquote { border-left: 3px solid var(--border); padding-left: 10px; color: var(--text-dim); }
+  .md hr { border: 0; border-top: 1px solid var(--border); margin: 10px 0; }
+  .md table { border-collapse: collapse; display: block; overflow-x: auto; max-width: 100%; font-size: 13px; }
+  .md th, .md td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; vertical-align: top; }
+  .md th { background: var(--bg); }
+  .md code { font-family: Consolas, "Cascadia Mono", monospace; font-size: 12.5px; }
+  .md :not(pre) > code { background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; }
+  .md .code-wrap { border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+  .md .code-head { display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    padding: 3px 6px 3px 10px; font-size: 11px; color: var(--text-dim); background: var(--bg); border-bottom: 1px solid var(--border); }
+  .md pre { margin: 0; overflow-x: auto; white-space: pre; }
+  .md pre code.hljs { display: block; padding: 8px 10px; background: var(--bg); }
+  button.copy-btn { font-size: 11px; padding: 1px 7px; }
   details.raw { margin-top: 6px; }
   details.raw summary { cursor: pointer; font-size: 11px; color: var(--text-dim); }
   details.raw pre { font-size: 11px; white-space: pre-wrap; color: var(--text-dim); max-height: 240px; overflow-y: auto; }
@@ -220,6 +246,171 @@ SPDX-License-Identifier: GPL-3.0-or-later
   </div>
 </div>
 
+<script src="/vendor/marked.umd.js"></script>
+<script src="/vendor/purify.min.js"></script>
+<script src="/vendor/highlight.min.js"></script>
+<script src="/vendor/hljs-powershell.min.js"></script>
+<script id="md-render">
+// ---------------------------------------------------------------------------
+// Markdown-Rendering der Stage-Antworten: marked (GFM) -> highlight.js fuer
+// Codebloecke -> DOMPurify. Ergebnis wird pro Quelltext gecacht, damit
+// renderHistory() (Recovery-Abgleich, Reload) nichts erneut parst/highlightet.
+// Fehlen die Bibliotheken, faellt die Anzeige auf reinen Text zurueck.
+// ---------------------------------------------------------------------------
+const MD_CACHE_MAX = 300;
+const mdCache = new Map();
+const mdStats = { renders: 0 };  // Anzahl tatsaechlicher Parse-Vorgaenge (Tests)
+// Auto-Erkennung fuer Codebloecke ohne Sprachangabe; bewusst ohne css/ini/markdown,
+// die bei kurzen Python-/Shell-Schnipseln sonst haeufig faelschlich gewinnen.
+const MD_AUTO_LANGS = ['python', 'powershell', 'bash', 'json', 'yaml', 'javascript', 'typescript',
+  'xml', 'sql', 'csharp', 'java', 'go', 'rust', 'cpp', 'diff'];
+// Nur Klassen, die das Rendering selbst erzeugt -- Klassen aus Modell-HTML
+// koennten sonst GUI-Selektoren (.msg.stage, .meta, .body ...) imitieren.
+const MD_CLASS_OK = /^(hljs(-[\w-]+)?|language-[\w+#-]+|[a-z]+_+)$/;
+const mdReady = !!(window.marked && window.DOMPurify && window.hljs);
+
+function mdEscape(s) {
+  return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+if (mdReady) {
+  marked.use({
+    gfm: true,
+    breaks: true,
+    renderer: {
+      code({ text, lang }) {
+        const want = (lang || '').trim().split(/\s+/)[0].toLowerCase();
+        let html = null;
+        let name = '';
+        try {
+          if (want && hljs.getLanguage(want)) {
+            html = hljs.highlight(text, { language: want, ignoreIllegals: true }).value;
+            name = want;
+          } else if (!want) {
+            const auto = hljs.highlightAuto(text, MD_AUTO_LANGS);
+            if (auto.language && auto.relevance >= 4) { html = auto.value; name = auto.language; }
+          }
+        } catch (e) { html = null; }
+        if (html === null) { html = mdEscape(text); name = want; }
+        const cls = name && /^[\w+#-]+$/.test(name) ? ` language-${name}` : '';
+        return `<pre><code class="hljs${cls}">${html}</code></pre>\n`;
+      },
+      // Rohes HTML aus der Modellantwort nur als Text zeigen (Platzhalter wie
+      // <datei> bleiben sichtbar); DOMPurify bleibt als zweite Sicherung.
+      html({ text }) {
+        return mdEscape(text);
+      },
+      // Keine externen Bilder nachladen -- als Link darstellen.
+      image({ href, title, text }) {
+        return `<a href="${mdEscape(href || '')}">${mdEscape(text || title || href || 'Bild')}</a>`;
+      },
+    },
+  });
+
+  DOMPurify.addHook('uponSanitizeAttribute', (node, data) => {
+    if (data.attrName === 'class') {
+      const kept = data.attrValue.split(/\s+/).filter(c => MD_CLASS_OK.test(c));
+      if (kept.length) data.attrValue = kept.join(' ');
+      else data.keepAttr = false;
+    }
+  });
+  DOMPurify.addHook('afterSanitizeAttributes', (node) => {
+    if (node.tagName === 'A' && node.hasAttribute('href')) {
+      node.setAttribute('target', '_blank');
+      node.setAttribute('rel', 'noopener noreferrer');
+    }
+    // Nur deaktivierte GFM-Task-Checkboxen zulassen.
+    if (node.tagName === 'INPUT' && !(node.getAttribute('type') === 'checkbox' && node.hasAttribute('disabled'))) {
+      node.remove();
+    }
+  });
+}
+
+const MD_PURIFY_CFG = {
+  USE_PROFILES: { html: true },
+  FORBID_TAGS: ['style', 'img', 'form', 'button', 'textarea', 'select', 'option', 'video', 'audio', 'source', 'picture'],
+  FORBID_ATTR: ['style', 'id', 'name'],
+  ALLOW_DATA_ATTR: false,
+};
+
+// Liefert fertiges, bereinigtes HTML (inkl. Code-Kopf mit Kopieren-Button)
+// oder null, wenn die Bibliotheken fehlen.
+function renderMarkdown(src) {
+  if (!mdReady) return null;
+  if (mdCache.has(src)) {
+    const hit = mdCache.get(src);
+    mdCache.delete(src);
+    mdCache.set(src, hit);  // LRU: zuletzt benutzt nach hinten
+    return hit;
+  }
+  mdStats.renders += 1;
+  let html;
+  try {
+    html = DOMPurify.sanitize(marked.parse(src), MD_PURIFY_CFG);
+  } catch (e) {
+    return null;
+  }
+  const tpl = document.createElement('template');
+  tpl.innerHTML = html;
+  tpl.content.querySelectorAll('pre').forEach(pre => {
+    const code = pre.querySelector('code');
+    const m = code && /(?:^|\s)language-([\w+#-]+)/.exec(code.className);
+    const wrap = document.createElement('div');
+    wrap.className = 'code-wrap';
+    const head = document.createElement('div');
+    head.className = 'code-head';
+    const label = document.createElement('span');
+    label.textContent = m ? m[1] : 'Code';
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'copy-btn';
+    btn.dataset.copy = 'code';
+    btn.textContent = 'Kopieren';
+    head.append(label, btn);
+    pre.replaceWith(wrap);
+    wrap.append(head, pre);
+  });
+  const out = tpl.innerHTML;
+  mdCache.set(src, out);
+  if (mdCache.size > MD_CACHE_MAX) mdCache.delete(mdCache.keys().next().value);
+  return out;
+}
+
+// Setzt den Antworttext eines .body-Elements; unveraenderter Text wird nicht
+// erneut gesetzt.
+function setMarkdownBody(body, src) {
+  if (body._mdSrc === src) return;
+  const html = renderMarkdown(src);
+  if (html === null) {
+    body.classList.remove('md');
+    body.textContent = src;
+  } else {
+    body.classList.add('md');
+    body.innerHTML = html;
+  }
+  body._mdSrc = src;
+}
+
+async function copyText(text) {
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch (e) { /* Fallback unten */ }
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.setAttribute('readonly', '');
+  ta.style.position = 'fixed';
+  ta.style.opacity = '0';
+  document.body.appendChild(ta);
+  ta.select();
+  let ok = false;
+  try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+  ta.remove();
+  return ok;
+}
+</script>
 <script>
 const API = location.origin;
 const logEl = document.getElementById('log');
@@ -308,22 +499,40 @@ function addUserMessage(text) {
   return div;
 }
 
-function addStageMessage() {
+function addStageMessage(stageId) {
   const div = document.createElement('div');
   div.className = 'msg stage';
+  if (stageId) div.dataset.stageId = stageId;
   div.innerHTML = '<span class="body">...</span><div class="meta"><span class="badge running">läuft</span></div>';
   logEl.appendChild(div);
   logEl.scrollTop = logEl.scrollHeight;
   return div;
 }
 
+function findStageDiv(stageId) {
+  if (!stageId) return null;
+  return Array.from(logEl.querySelectorAll('.msg.stage'))
+    .find(d => d.dataset.stageId === stageId) || null;
+}
+
+// Idempotent: mehrfacher Aufruf (SSE + Abort-Antwort + Recovery-Poll) fuer
+// dieselbe Stage erzeugt keine doppelten Details-Bloecke.
 function updateStageMessage(div, stage) {
   const body = div.querySelector('.body');
   const meta = div.querySelector('.meta');
-  body.textContent = stage.summary || '(keine Zusammenfassung)';
+  div.querySelectorAll('details.raw').forEach(d => d.remove());
+  if (stage.status === 'running') {
+    body.classList.remove('md');
+    body._mdSrc = undefined;
+    body.textContent = '...';
+    meta.innerHTML = '<span class="badge running">läuft</span>';
+    return;
+  }
+  setMarkdownBody(body, stage.summary || '(keine Zusammenfassung)');
   const badge = `<span class="badge ${stage.status}">${stage.status}</span>`;
   const dur = stage.duration_s != null ? `<span>${stage.duration_s}s</span>` : '';
-  meta.innerHTML = badge + dur;
+  meta.innerHTML = badge + dur
+    + (stage.summary ? '<button type="button" class="copy-btn" data-copy="answer">Antwort kopieren</button>' : '');
   if (stage.stderr_tail) {
     const details = document.createElement('details');
     details.className = 'raw';
@@ -332,6 +541,25 @@ function updateStageMessage(div, stage) {
     div.appendChild(details);
   }
 }
+
+// Kopieren-Buttons (Antwort + Codebloecke) per Event-Delegation: ueberlebt
+// den kompletten Neuaufbau des Verlaufs durch renderHistory().
+logEl.addEventListener('click', async (e) => {
+  const btn = e.target.closest('button.copy-btn');
+  if (!btn || !logEl.contains(btn)) return;
+  let text = '';
+  if (btn.dataset.copy === 'answer') {
+    const body = btn.closest('.msg.stage')?.querySelector('.body');
+    text = (body && body._mdSrc) || '';
+  } else {
+    const code = btn.closest('.code-wrap')?.querySelector('pre code');
+    text = code ? code.textContent : '';
+  }
+  const label = btn.dataset.label || (btn.dataset.label = btn.textContent);
+  const ok = text ? await copyText(text) : false;
+  btn.textContent = ok ? 'Kopiert' : 'Kopieren fehlgeschlagen';
+  setTimeout(() => { btn.textContent = label; }, 1500);
+});
 
 async function ensureSession() {
   const saved = safeLocalStorage(() => localStorage.getItem('reaper_session_id'), null);
@@ -344,6 +572,12 @@ async function ensureSession() {
         renderHistory(data);
         sessionIdEl.textContent = sessionId;
         refreshContextPreview();
+        // Nach Reload: laeuft serverseitig noch eine Stage, GUI in den
+        // Laufzustand versetzen und das Ergebnis per Session-API nachladen
+        // (der alte SSE-Stream ist weg; es wird NIE erneut gesendet).
+        if ((data.stages || []).some(s => s.status === 'running')) {
+          startRecovery('Stage läuft noch (nach Neuladen) – Ergebnis wird nachgeladen ...');
+        }
         return;
       }
     } catch (e) { /* fall through to new session */ }
@@ -362,6 +596,9 @@ async function createSession() {
   refreshContextPreview();
 }
 
+// Server-Zustand ist die einzige Wahrheit: der Verlauf wird komplett aus
+// GET /sessions/{id} neu aufgebaut (nie angehaengt) -- dadurch keine doppelten
+// Nachrichten/Stage-Anzeigen, egal wie oft synchronisiert wird.
 function renderHistory(session) {
   logEl.innerHTML = '';
   const stagesById = {};
@@ -370,10 +607,113 @@ function renderHistory(session) {
     addUserMessage(m.content);
     const stage = stagesById[m.stage_id];
     if (stage) {
-      const div = addStageMessage();
+      const div = addStageMessage(stage.stage_id);
       updateStageMessage(div, stage);
     }
   });
+  lastRenderSig = sessionSignature(session);
+}
+
+function sessionSignature(session) {
+  return JSON.stringify([
+    (session.messages || []).length,
+    (session.stages || []).map(s => [s.stage_id, s.status]),
+  ]);
+}
+
+function setRunningUi(on) {
+  stageRunning = on;
+  sendBtn.disabled = on;
+  abortBtn.style.display = on ? 'inline-block' : 'none';
+}
+
+async function fetchSession(sid) {
+  const r = await fetch(`${API}/sessions/${sid}`, { cache: 'no-store' });
+  if (!r.ok) {
+    const err = new Error('session http ' + r.status);
+    err.status = r.status;
+    throw err;
+  }
+  return r.json();
+}
+
+// ---------------------------------------------------------------------------
+// Recovery: SSE-Stream verloren (Reload, Netzabbruch, Server-Neustart) ->
+// Stage-Status per GET /sessions/{id} pollen, bis keine Stage mehr 'running'
+// ist. Nur lesend: es wird NIE erneut POST /messages gesendet. Live-Logs der
+// Zwischenzeit sind verloren (akzeptiert), das finale Ergebnis kommt aus der
+// Session (auch aborted/watchdog_timeout/incomplete).
+// ---------------------------------------------------------------------------
+const RECOVERY_POLL_MS = 2000;
+let recovering = false;
+let lastRenderSig = null;
+let sseActive = false;
+// Optimistisch angezeigte Nachricht, deren POST die Antwort verloren hat:
+// { text, messageCount, emptyPolls } -- wird aufgeloest, sobald der Server
+// sie kennt (oder nach zwei Polls ohne sie als "nicht angenommen" verworfen).
+let pendingSend = null;
+
+function startRecovery(statusText) {
+  setRunningUi(true);
+  if (statusText) setStatus(statusText);
+  if (recovering) return;
+  recovering = true;
+  const sid = sessionId;
+  const tick = async () => {
+    if (!recovering || sid !== sessionId) return;
+    let session;
+    try {
+      session = await fetchSession(sid);
+    } catch (e) {
+      if (e.status === 404) {
+        stopRecovery();
+        setStatus('Session auf dem Server nicht mehr vorhanden.', true);
+        return;
+      }
+      setStatus('Server nicht erreichbar – neuer Versuch ...', true);
+      setTimeout(tick, RECOVERY_POLL_MS);
+      return;
+    }
+    if (sid !== sessionId) return;
+    const msgCount = (session.messages || []).length;
+    if (pendingSend && msgCount > pendingSend.messageCount) {
+      pendingSend = null;  // Server hat die Nachricht angenommen
+    }
+    if (sessionSignature(session) !== lastRenderSig) {
+      renderHistory(session);
+    }
+    const running = (session.stages || []).find(s => s.status === 'running');
+    if (pendingSend && !running) {
+      pendingSend.emptyPolls += 1;
+      if (pendingSend.emptyPolls >= 2) {
+        // Server kennt die Nachricht nicht -> sie wurde nie ausgefuehrt.
+        renderHistory(session);
+        if (!input.value) input.value = pendingSend.text;
+        pendingSend = null;
+        stopRecovery();
+        setStatus('Nachricht wurde nicht verarbeitet (Verbindung verloren) – bitte erneut senden.', true);
+        return;
+      }
+    }
+    if (running || pendingSend) {
+      liveMetaEl.textContent = running
+        ? `läuft (pid ${running.pid}) – Live-Log nach Verbindungsverlust nicht verfügbar.`
+        : liveMetaEl.textContent;
+      setTimeout(tick, RECOVERY_POLL_MS);
+      return;
+    }
+    const last = (session.stages || []).slice(-1)[0];
+    stopRecovery();
+    setStatus('');
+    if (last) liveMetaEl.textContent = `Letzte Stage beendet (${last.status}).`;
+    refreshContextPreview();
+  };
+  tick();
+}
+
+function stopRecovery() {
+  recovering = false;
+  setRunningUi(false);
 }
 
 newSessionBtn.addEventListener('click', async () => {
@@ -396,9 +736,23 @@ abortBtn.addEventListener('click', async () => {
   if (!sessionId) return;
   abortBtn.disabled = true;
   try {
-    await fetch(`${API}/sessions/${sessionId}/abort`, { method: 'POST' });
+    const r = await fetch(`${API}/sessions/${sessionId}/abort`, { method: 'POST' });
+    if (r.ok) {
+      // Endstatus direkt aus der Abort-Antwort anzeigen -- wichtig nach einem
+      // Reload, wenn kein SSE-Stream mehr das Terminal-Event liefert.
+      const data = await r.json();
+      const div = data.stage && findStageDiv(data.stage.stage_id);
+      if (div) updateStageMessage(div, data.stage);
+    } else if (r.status === 409) {
+      // Stage war schon beendet (natuerliches Ende kam zuvor) -> Status abgleichen.
+      if (!sseActive) startRecovery();
+    } else {
+      setStatus(`Abbruch fehlgeschlagen: HTTP ${r.status}`, true);
+    }
   } catch (e) { setStatus('Abbruch fehlgeschlagen: ' + e, true); }
   abortBtn.disabled = false;
+  // Ohne aktiven SSE-Stream bestaetigt der Recovery-Poll den Endstatus.
+  if (!sseActive && sessionId) startRecovery();
 });
 
 async function sendMessage() {
@@ -406,12 +760,11 @@ async function sendMessage() {
   if (!text || stageRunning || !sessionId) return;
   input.value = '';
   input.style.height = 'auto';
-  addUserMessage(text);
+  const messageCount = logEl.querySelectorAll('.msg.user').length;
+  const userDiv = addUserMessage(text);
   const stageDiv = addStageMessage();
 
-  stageRunning = true;
-  sendBtn.disabled = true;
-  abortBtn.style.display = 'inline-block';
+  setRunningUi(true);
   setStatus('Verbinde ...');
 
   const body = {
@@ -421,6 +774,9 @@ async function sendMessage() {
     think: thinkBox.checked,
   };
 
+  const sse = { started: false, completed: false };
+  let lostError = null;
+  sseActive = true;
   try {
     const resp = await fetch(`${API}/sessions/${sessionId}/messages`, {
       method: 'POST',
@@ -428,27 +784,45 @@ async function sendMessage() {
       body: JSON.stringify(body),
     });
     if (resp.status === 409) {
-      setStatus('Es läuft bereits eine Stage in dieser Session.', true);
+      // Nicht angenommen: optimistische Anzeige entfernen (sonst Phantom-
+      // Nachricht) und den tatsaechlich laufenden Stand vom Server holen.
+      sseActive = false;
+      userDiv.remove();
       stageDiv.remove();
+      if (!input.value) input.value = text;
+      startRecovery('Es läuft bereits eine Stage in dieser Session – Status wird geladen ...');
       return;
     }
     if (!resp.ok) {
       const errBody = await resp.text();
-      setStatus(`Fehler ${resp.status}: ${errBody}`, true);
+      sseActive = false;
+      userDiv.remove();
       stageDiv.remove();
+      if (!input.value) input.value = text;
+      setRunningUi(false);
+      setStatus(`Fehler ${resp.status}: ${errBody}`, true);
       return;
     }
-    await readSseStream(resp.body, stageDiv);
+    await readSseStream(resp.body, stageDiv, sse);
   } catch (e) {
-    setStatus('Verbindung verloren: ' + e, true);
-  } finally {
-    stageRunning = false;
-    sendBtn.disabled = false;
-    abortBtn.style.display = 'none';
+    lostError = e;
   }
+  sseActive = false;
+  if (sse.completed) {
+    setRunningUi(false);
+    setStatus('');
+    return;
+  }
+  // Stream abgerissen oder ohne Terminal-Event beendet: Stage laeuft ggf.
+  // serverseitig weiter. NICHT erneut senden -- Status ueber die Session-API
+  // abgleichen. War stage_started noch nicht da, ist unklar, ob der Server die
+  // Nachricht angenommen hat -> pendingSend klaert das beim Pollen.
+  if (!sse.started) pendingSend = { text, messageCount, emptyPolls: 0 };
+  startRecovery('Verbindung unterbrochen' + (lostError ? ` (${lostError.message || lostError})` : '')
+    + ' – Stage-Status wird vom Server nachgeladen ...');
 }
 
-async function readSseStream(bodyStream, stageDiv) {
+async function readSseStream(bodyStream, stageDiv, sse) {
   const reader = bodyStream.getReader();
   const decoder = new TextDecoder();
   let buf = '';
@@ -460,13 +834,12 @@ async function readSseStream(bodyStream, stageDiv) {
     while ((idx = buf.indexOf('\n\n')) !== -1) {
       const frame = buf.slice(0, idx);
       buf = buf.slice(idx + 2);
-      handleSseFrame(frame, stageDiv);
+      handleSseFrame(frame, stageDiv, sse);
     }
   }
-  setStatus('');
 }
 
-function handleSseFrame(frame, stageDiv) {
+function handleSseFrame(frame, stageDiv, sse) {
   let eventType = 'message';
   let dataLine = null;
   frame.split('\n').forEach(line => {
@@ -478,6 +851,8 @@ function handleSseFrame(frame, stageDiv) {
   try { data = JSON.parse(dataLine); } catch (e) { return; }
 
   if (eventType === 'stage_started') {
+    sse.started = true;
+    stageDiv.dataset.stageId = data.stage_id;
     setStatus(`Gestartet (pid ${data.pid}) ...`);
     liveMetaEl.textContent = `läuft (pid ${data.pid}) ...`;
     liveLogEl.textContent = '';
@@ -490,6 +865,7 @@ function handleSseFrame(frame, stageDiv) {
     liveLogEl.scrollTop = liveLogEl.scrollHeight;
     handleSubstageLogLine(data.text);
   } else if (eventType === 'stage_completed') {
+    sse.completed = true;
     updateStageMessage(stageDiv, data);
     setStatus('');
     liveMetaEl.textContent = `Letzte Stage beendet (${data.status}).`;

@@ -1,0 +1,42 @@
+# Copyright (C) 2026 Robert Backhaus
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "reaper-ai"
+dynamic = ["version"]
+description = "Lokale Chat-GUI und FastAPI-Schicht fuer den Stage-Runner (Ollama), Single-User, nur Loopback."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
+authors = [{ name = "Robert Backhaus" }]
+dependencies = [
+    "fastapi>=0.143.2,<1",
+    "uvicorn>=0.54.0,<1",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Web Environment",
+    "Framework :: FastAPI",
+    "Intended Audience :: Developers",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+[project.scripts]
+reaper-ai = "reaper_ai.cli:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "reaper_ai.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+reaper_ai = ["web/*.html", "web/vendor/*"]
