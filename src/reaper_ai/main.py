@@ -1,63 +1,64 @@
 # Copyright (C) 2026 Robert Backhaus
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-r"""Reaper API -- P5: HTTP-Geruest + Sessions + JSONL-Persistenz + Stage als Subprozess
-+ Fehler-/Abbruchbehandlung (Prozessbaum-Kill, aktiver Watchdog, POST /abort)
-+ SSE-Statusausgabe fuer POST /sessions/{id}/messages.
+r"""Reaper API -- P5: HTTP skeleton + sessions + JSONL persistence + stage as a subprocess
++ error/abort handling (process-tree kill, active watchdog, POST /abort)
++ SSE status output for POST /sessions/{id}/messages.
 
-Zielarchitektur v1 (coding-v2, stage-runner, decision_record):
-- POST /sessions                  neue Chat-Session anlegen (session_created-Event)
-- GET  /sessions/{id}             Session lesen, 404 wenn unbekannt
-- POST /sessions/{id}/messages    Stage fuer den Nutzer-Task ausfuehren und den
-                                  Fortschritt als SSE-Stream liefern (P5):
-                                  text/event-stream, sofort ein stage_started-
-                                  Event, alle 5 s ein heartbeat-Event, am Ende
-                                  genau EIN Terminal-Event stage_completed mit
-                                  dem vollen Stage-Objekt (status/exit_code/
-                                  finished_at/duration_s/summary/stdout_tail/
-                                  stderr_tail). 404/409 bleiben VOR dem
-                                  Stream-Start. Kein Token-Streaming, keine
-                                  Tool-Events (bewusst, Zielarchitektur v1).
-- POST /sessions/{id}/abort       laufende Stage kontrolliert abbrechen (P4),
-                                  Prozessbaum inkl. pwsh-Kindprozesse wird beendet
+Target architecture v1 (coding-v2, stage-runner, decision_record):
+- POST /sessions                  create a new chat session (session_created event)
+- GET  /sessions/{id}             read a session, 404 if unknown
+- POST /sessions/{id}/messages    run a stage for the user's task and deliver the
+                                  progress as an SSE stream (P5):
+                                  text/event-stream, a stage_started event
+                                  immediately, a heartbeat event every 5 s, and
+                                  at the end exactly ONE terminal event
+                                  stage_completed with the full stage object
+                                  (status/exit_code/finished_at/duration_s/
+                                  summary/stdout_tail/stderr_tail). 404/409 stay
+                                  BEFORE the stream starts. No token streaming,
+                                  no tool events (deliberate, target arch v1).
+- POST /sessions/{id}/abort       abort the running stage in a controlled way (P4);
+                                  the process tree incl. pwsh child processes is killed
 
-Eine Stage = das bestehende C:\tools\stage-runner\stage_runner.py als separater
-Subprozess (eigene venv dort). Der Runner-Code bleibt unveraendert und wird NICHT
-importiert. Exit-Codes 0-3 sind die EINZIGE Statusquelle (Zielarchitektur); abgebrochene
-Stages (Nutzer-Abort oder API-Watchdog) haben exit_code=null, weil kein Runner-Urteil
-vorliegt. Die stdout/stderr-Pipes werden durchgaengig geleert (voller Pipe-Puffer =
-Deadlock) und liefern Diagnose-Tails plus die finish_stage-Zusammenfassung als
-Anzeigetext.
+A stage = the existing C:\tools\stage-runner\stage_runner.py as a separate
+subprocess (with its own venv there). The runner code stays unchanged and is NOT
+imported. Exit codes 0-3 are the ONLY status source (target architecture); aborted
+stages (user abort or API watchdog) have exit_code=null because there is no runner
+verdict. The stdout/stderr pipes are drained continuously (full pipe buffer =
+deadlock) and provide diagnostic tails plus the finish_stage summary as display
+text.
 
-Prozessbaum-Kill (Windows): jede Stage laeuft in einem Windows-Job-Object mit
-KILL_ON_JOB_CLOSE. TerminateJobObject beendet damit den ganzen Baum atomar
-(Hauptprozess + alle pwsh-Kindprozesse, auch spaeter gestartete). Wenn der API-Prozess
-selbst stirbt, schliessen sich die Job-Handles und das OS toetet die Baeume -- keine
-Orphan-Prozesse mehr nach einem API-Crash.
+Process-tree kill (Windows): every stage runs in a Windows job object with
+KILL_ON_JOB_CLOSE. TerminateJobObject therefore kills the whole tree atomically
+(main process + all pwsh child processes, including ones started later). If the API
+process itself dies, the job handles close and the OS kills the trees -- no more
+orphan processes after an API crash.
 
-Status-Wortschatz: success/error/wall_clock/max_iterations (Exit-Code 0-3),
-aborted (Nutzer via /abort), watchdog_timeout (API-Watchdog), incomplete (nur noch:
-Stage lief beim API-Neustart), unknown_rc_N (defensiv, darf normal nicht vorkommen).
+Status vocabulary: success/error/wall_clock/max_iterations (exit code 0-3),
+aborted (user via /abort), watchdog_timeout (API watchdog), incomplete (only:
+stage was running when the API restarted), unknown_rc_N (defensive, should not
+normally occur).
 
-Persistenz: eine JSONL-Datei pro Session unter <data-dir>/sessions/<session_id>.jsonl,
-append-only, eine Zeile pro Event. Statuswechsel werden angehaengt, nie ueberschrieben.
-Beim Serverstart werden alle Dateien eingelesen und der Zustand aus der vollen
-Event-Folge rekonstruiert; Stages, die dann noch "running" waren, werden "incomplete"
-markiert und NICHT automatisch neu ausgefuehrt.
+Persistence: one JSONL file per session under <data-dir>/sessions/<session_id>.jsonl,
+append-only, one line per event. Status changes are appended, never overwritten.
+On server start all files are read and the state is reconstructed from the full
+event sequence; stages that were still "running" at that point are marked
+"incomplete" and are NOT re-run automatically.
 
-P5-Ablauf: POST /messages laeuft die Startphase UNTER dem Session-Lock synchron
-durch (404/409-Pruefung bleibt VOR dem Stream-Start; Subprozess + Kill-Job +
-Drainer + Watchdog + JSONL-Events message_received/stage_started) und gibt dann
-eine StreamingResponse zurueck. Warten auf den Exit, Finalisierung und
-Persistenz des Terminal-Events laufen in einem Worker-Thread pro Request und
-liefern das Ergebnis als Queue-Items an den async SSE-Generator (stage_started
-wird vorab im Request-Thread gepusht). Client-Trennung waehrend der Stage
-aendert nichts am Runner-Lauf -- Abbruch bleibt POST /abort.
+P5 flow: POST /messages runs the start phase synchronously UNDER the session lock
+(the 404/409 check stays BEFORE the stream starts; subprocess + kill job +
+drainers + watchdog + JSONL events message_received/stage_started) and then
+returns a StreamingResponse. Waiting for the exit, finalization and persisting
+the terminal event run in one worker thread per request and deliver the result
+as queue items to the async SSE generator (stage_started is pushed up front in
+the request thread). A client disconnect during the stage does not affect the
+runner -- aborting is still POST /abort.
 
-Seit P5 ergaenzt: begrenzter Chat-Kontext fuer Folgeauftraege (_build_task_text,
-Vorschau ueber GET /sessions/{id}/context), live log_line-Events mit begrenzter
-Queue (BoundedSseQueue, log_dropped bei Ueberlast), GET /health fuer die GUI-Ampel
-und /vendor fuer die lokal eingebundenen GUI-Bibliotheken. Endpunkt-Doku: docs/api.md.
+Added since P5: limited chat context for follow-up tasks (_build_task_text,
+preview via GET /sessions/{id}/context), live log_line events with a bounded
+queue (BoundedSseQueue, log_dropped on overload), GET /health for the GUI status
+light and /vendor for the locally bundled GUI libraries. Endpoint docs: docs/api.md.
 """
 from __future__ import annotations
 
@@ -91,112 +92,112 @@ from .config import DEFAULT_RUNNER_DIR, data_dir, default_runner_python, ollama_
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("reaper-api")
 
-# Paketierung: Code und GUI liegen im installierten Paket (APP_DIR), Laufzeitdaten
-# (Sessions, Temp-Taskdateien) im Datenverzeichnis DATA_DIR AUSSERHALB des Pakets.
-# Die CLI (reaper_ai/cli.py) loest Konfiguration/Datenverzeichnis auf und reicht sie
-# als Env-Vars herein; main.py liest NUR Env-Vars (siehe reaper_ai/config.py).
+# Packaging: code and GUI live in the installed package (APP_DIR), runtime data
+# (sessions, temp task files) in the data directory DATA_DIR OUTSIDE the package.
+# The CLI (reaper_ai/cli.py) resolves configuration/data directory and passes them
+# in as env vars; main.py reads ONLY env vars (see reaper_ai/config.py).
 APP_DIR = Path(__file__).resolve().parent
 DATA_DIR = data_dir()
 SESSIONS_DIR = DATA_DIR / "sessions"
-TASK_TMP_DIR = DATA_DIR / "tasks"  # Temp-Taskdateien fuer --task @datei (Windows-argv-Limit)
+TASK_TMP_DIR = DATA_DIR / "tasks"  # temp task files for --task @file (Windows argv limit)
 
-# Stage-Runner: bestehender Code, eigene venv, eigenes Verzeichnis -- nur als Subprozess.
-# Verzeichnis per REAPER_STAGE_RUNNER_DIR (bzw. runner_dir in config.toml)
-# konfigurierbar; Python/Skript zusaetzlich einzeln ueberschreibbar (Regressionstests in
-# test-queue/ nutzen das fuer einen Fake-Runner). Ohne Konfiguration unveraendert
-# C:\tools\stage-runner wie vorher.
+# Stage runner: existing code, own venv, own directory -- only as a subprocess.
+# Directory configurable via REAPER_STAGE_RUNNER_DIR (or runner_dir in config.toml);
+# Python/script can additionally be overridden individually (regression tests in
+# test-queue/ use this for a fake runner). Without configuration it is still
+# C:\tools\stage-runner as before.
 STAGE_RUNNER_DIR = Path(os.environ.get("REAPER_STAGE_RUNNER_DIR") or DEFAULT_RUNNER_DIR)
 STAGE_PYTHON = Path(os.environ["REAPER_STAGE_PYTHON"]) if os.environ.get("REAPER_STAGE_PYTHON") \
     else default_runner_python(STAGE_RUNNER_DIR)
 STAGE_RUNNER = Path(os.environ["REAPER_STAGE_RUNNER_SCRIPT"]) if os.environ.get("REAPER_STAGE_RUNNER_SCRIPT") \
     else STAGE_RUNNER_DIR / "stage_runner.py"
 
-# API-Watchdog: bewusst GROSSER als die interne Wall-Clock-Notbremse des Runners
-# (20 min), damit eine normale Stage immer zuerst selbst endet (rc=2); feuert nur bei
-# echtem Hang und beendet seither den Prozessbaum AKTIV (P4, Job-Object).
-# Per Env-Var verkuerzbar NUR fuer Regressionstests (test-queue/test_live_api.py,
-# Watchdog-unter-voller-Queue-Fall) -- ohne die Variable unveraendert 25 min.
+# API watchdog: deliberately LARGER than the runner's internal wall-clock emergency
+# brake (20 min), so a normal stage always ends on its own first (rc=2); it only fires
+# on a real hang and since P4 kills the process tree ACTIVELY (job object).
+# Can be shortened via env var ONLY for regression tests (test-queue/test_live_api.py,
+# watchdog-under-full-queue case) -- without the variable it stays 25 min.
 STAGE_TIMEOUT_S = int(os.environ.get("REAPER_STAGE_TIMEOUT_S", str(25 * 60)))
 
-# Wie lange POST /abort auf die Finalisierung des Kills wartet, bevor es mit 500 antwortet.
-# Normal: Kill + Reap + Pipe-Drain-Ende + JSONL-Event dauern deutlich unter einer Sekunde.
+# How long POST /abort waits for the kill to be finalized before answering with 500.
+# Normally kill + reap + end of pipe drain + JSONL event take well under a second.
 ABORT_FINALIZE_TIMEOUT_S = 30
 
-# Pro Pipe so viel Tail in Speicher/Event halten (der Runner schreibt praktisch nur stderr).
+# Tail kept in memory/event per pipe (the runner writes practically only to stderr).
 TAIL_LIMIT = 8 * 1024
 
-# Zeilenpuffer des stderr-Drainers (Live-Events + Summary-Capture): eine einzelne
-# Zeile ohne '\n' darf den Speicher nicht unbegrenzt wachsen lassen. Ab dieser
-# Laenge wird die Zeile gekappt (Rest bis zum naechsten '\n' verworfen) und mit
-# _LINE_TRUNCATED_SUFFIX markiert. Gleich gross wie der Summary-Capture-Deckel.
+# Line buffer of the stderr drainer (live events + summary capture): a single line
+# without '\n' must not grow memory without bound. From this length on the line is
+# capped (the rest up to the next '\n' is discarded) and marked with
+# _LINE_TRUNCATED_SUFFIX. Same size as the summary-capture cap.
 _LINE_BUFFER_LIMIT = 64 * 1024
-_LINE_TRUNCATED_SUFFIX = " ...[Zeile gekuerzt]"
+_LINE_TRUNCATED_SUFFIX = " ...[line truncated]"
 
-# P5: Herzschlag-Intervall des SSE-Streams (Stage laeuft sonst bis zu 20 min;
-# das Event haelt den Stream sichtbar live und beweist Fortschritt an den Client).
+# P5: heartbeat interval of the SSE stream (otherwise a stage runs for up to 20 min
+# silently; the event keeps the stream visibly live and proves progress to the client).
 HEARTBEAT_INTERVAL_S = 5.0
 
-# Begrenzte SSE-Event-Queue (P1-Fix): bei einem langsamen/getrennten Client UND
-# gleichzeitig hohem Logaufkommen (z. B. eine Stage mit vielen Tool-Calls) wuchs
-# die vorher unbegrenzte queue.Queue() ohne Obergrenze -- log_line-Events werden
-# jetzt bei Ueberlast verworfen (gezaehlt, am Stage-Ende als ein log_dropped-Event
-# gemeldet), stage_started/stage_completed/Sentinel werden GARANTIERT zugestellt
-# (verdraengen notfalls aeltere log_line-Eintraege). 1000 Eintraege ~ mehrere
-# Minuten normaler Log-Rate bei 5-10 Zeilen/s -- grosszuegig genug fuer kurze
-# Verzoegerungen, klein genug um den Speicher pro Stage hart zu begrenzen.
+# Bounded SSE event queue (P1 fix): with a slow/disconnected client AND a high log
+# volume at the same time (e.g. a stage with many tool calls) the previously
+# unbounded queue.Queue() grew without limit -- log_line events are now dropped
+# on overload (counted, reported at stage end as one log_dropped event), while
+# stage_started/stage_completed/sentinel are GUARANTEED to be delivered (evicting
+# older log_line entries if necessary). 1000 entries ~ several minutes of normal
+# log rate at 5-10 lines/s -- generous enough for short delays, small enough to
+# hard-limit memory per stage.
 SSE_QUEUE_MAXSIZE = 1000
 
-# Request-Defaults: lokal vorhandene Ollama-Modelle (verifiziert 2026-10-15: qwen3:8b
-# 8.2B Q4_K_M und qwen3.8-q5 27.3B Q5_K_M; das qwen36-a3b:latest aus dem Runner-Beispiel
-# existiert NICHT). Seit dem Umzug weg von Jan (2026-10-16) ist Ollama die EINZIGE
-# Modell-Quelle -- qwen3.8-q5 ist Reapers Hauptmodell (role=main, volle Persona),
-# qwen3:8b bleibt das schnelle Default-Modell fuer run_substage-Worker-Stages.
+# Request defaults: locally available Ollama models (verified 2026-10-15: qwen3:8b
+# 8.2B Q4_K_M and qwen3.8-q5 27.3B Q5_K_M; the qwen36-a3b:latest from the runner example
+# does NOT exist). Since the move away from Jan (2026-10-16) Ollama is the ONLY
+# model source -- qwen3.8-q5 is Reaper's main model (role=main, full persona),
+# qwen3:8b remains the fast default model for run_substage worker stages.
 DEFAULT_MODEL = "qwen3.8-q5:latest"
-DEFAULT_PROJECT = "coding-v2"  # Basic-Memory-Projekt, in dem das Stage-Wissen haengt
+DEFAULT_PROJECT = "coding-v2"  # Basic Memory project that holds the stage knowledge
 
-# Exit-Code -> Status. NUR hier abgeleitet; Logtext wird NICHT fuer Status geparst.
+# Exit code -> status. Derived ONLY here; log text is NOT parsed for status.
 EXIT_OUTCOMES = {0: "success", 1: "error", 2: "wall_clock", 3: "max_iterations"}
 
-# Status fuer aktiv beendete Stages (kein Runner-Urteil -> exit_code bleibt null):
-STATUS_ABORTED = "aborted"            # vom Nutzer ueber POST /abort abgebrochen
-STATUS_WATCHDOG = "watchdog_timeout"  # API-Watchdog hat die Stage beendet
+# Status for actively terminated stages (no runner verdict -> exit_code stays null):
+STATUS_ABORTED = "aborted"            # aborted by the user via POST /abort
+STATUS_WATCHDOG = "watchdog_timeout"  # the API watchdog terminated the stage
 
-# Race-Fix (P1): Sentinel-Wert fuer _kill_intent[session_id] -- markiert den
-# LINEARISIERUNGSPUNKT zwischen natuerlichem Prozessende und Abbruch (siehe
-# _finalize_stage/_terminate_live_stage). _kill_intent dient damit nicht mehr
-# nur als "welcher Abbruchgrund", sondern als EINZIGE verbindliche Entscheidung:
-# None = noch offen, _NATURAL = natuerliches Ende hat den Punkt zuerst erreicht
-# (ein danach eintreffender Abort kommt zu spaet), jeder andere String = ein
-# Abbruchgrund hat den Punkt zuerst erreicht (erster Abbruchgrund gewinnt).
+# Race fix (P1): sentinel value for _kill_intent[session_id] -- marks the
+# LINEARIZATION POINT between natural process end and abort (see
+# _finalize_stage/_terminate_live_stage). _kill_intent therefore no longer only
+# says "which abort reason" but is the ONLY binding decision:
+# None = still open, _NATURAL = natural end reached the point first
+# (an abort arriving afterwards is too late), any other string = an abort
+# reason reached the point first (first abort reason wins).
 _NATURAL = "__natural_completion__"
 
-CREATE_NO_WINDOW = 0x08000000  # Windows: kein Konsolenfenster (wie der Runner bei pwsh)
+CREATE_NO_WINDOW = 0x08000000  # Windows: no console window (like the runner for pwsh)
 
+# Protocol marker written by stage_runner.py (finish_stage). It is part of the
+# runner's output format, NOT a Reaper-AI message -- it must stay exactly as the
+# runner emits it (German), otherwise the summary is no longer found.
 _FINISH_MARKER = "=== STAGE BEENDET"
 _TS_PREFIX = re.compile(r"^\[\d{2}:\d{2}:\d{2}\] ", flags=re.M)
 
-# P1-Fix (Ergebnisverlust bei langen Logs): grosszuegiger Deckel NUR fuer die
-# live mitgeschnittene finish_stage-Zusammenfassung (siehe _SummaryCapture),
-# unabhaengig vom allgemeinen Diagnose-Tail (TAIL_LIMIT = 8 KiB), der bei
-# umfangreichem Log die Zusammenfassung verlieren kann, weil er nur die
-# JEWEILS LETZTEN paar KB behaelt. 64 KiB laesst auch laengere normale
-# Zusammenfassungen unbeschnitten; nur der (in der Praxis nicht vorkommende)
-# Fall, dass nach finish_stage weiter unbegrenzt in stderr geschrieben wird,
-# wird gekappt.
+# P1 fix (result loss with long logs): generous cap ONLY for the finish_stage
+# summary captured live (see _SummaryCapture), independent of the general
+# diagnostic tail (TAIL_LIMIT = 8 KiB), which can lose the summary with an
+# extensive log because it only keeps the LAST few KB. 64 KiB leaves even longer
+# normal summaries untruncated; only the case (not seen in practice) where stderr
+# keeps being written to without limit after finish_stage gets capped.
 _SUMMARY_CAPTURE_LIMIT = 64 * 1024
 
 
 class _SummaryCapture:
-    """Faengt die finish_stage-Zusammenfassung (Marker '=== STAGE BEENDET')
-    LIVE beim Draino der stderr-Pipe ab -- unabhaengig vom begrenzten
-    Diagnose-Tail, der nur die letzten paar KB des GESAMTEN Logs haelt und
-    die Zusammenfassung bei umfangreichem Output verdraengen kann. Arbeitet
-    zeilenweise auf bereits vollstaendig decodierten Zeilen (siehe
-    _drain_capped) -- Marker und UTF-8-Mehrbyte-Zeichen koennen dadurch nie
-    an einer Chunk-Grenze zerschnitten werden (das Splitten erfolgt dort
-    ausschliesslich auf dem Byte 0x0A, das in UTF-8 nie Teil eines
-    Mehrbyte-Zeichens ist). Haelt NICHT den vollen Log im Speicher: nur die
-    Zeilen ab dem Marker, begrenzt auf _SUMMARY_CAPTURE_LIMIT Zeichen."""
+    """Captures the finish_stage summary (marker '=== STAGE BEENDET') LIVE while
+    draining the stderr pipe -- independent of the bounded diagnostic tail, which
+    only holds the last few KB of the WHOLE log and can push the summary out with
+    extensive output. Works line by line on already fully decoded lines (see
+    _drain_capped) -- marker and UTF-8 multi-byte characters can therefore never
+    be cut at a chunk boundary (splitting there happens exclusively on byte 0x0A,
+    which in UTF-8 is never part of a multi-byte character). Does NOT keep the
+    full log in memory: only the lines from the marker on, limited to
+    _SUMMARY_CAPTURE_LIMIT characters."""
 
     __slots__ = ("_found", "_parts", "_size", "_truncated")
 
@@ -209,33 +210,32 @@ class _SummaryCapture:
     def feed_line(self, line: str) -> None:
         if not self._found:
             if _FINISH_MARKER in line:
-                self._found = True  # Rest der Markerzeile ("(success=..) ===") verwerfen.
+                self._found = True  # discard the rest of the marker line ("(success=..) ===").
             return
         if self._truncated:
             return
         remaining = _SUMMARY_CAPTURE_LIMIT - self._size
         if remaining <= 0:
             self._truncated = True
-            self._parts.append("...[gekuerzt]...")
+            self._parts.append("...[truncated]...")
             return
         if len(line) > remaining:
-            # Einzelne Zeile selbst schneidet den Deckel -- nur den passenden
-            # Rest behalten statt die ganze (potenziell riesige) Zeile erst
-            # anzuhaengen und danach zu merken, dass der Deckel ueberschritten
-            # ist (sonst koennte EINE pathologische Zeile den Speicherdeckel
-            # in einem Schritt sprengen).
+            # A single line itself crosses the cap -- keep only the fitting rest
+            # instead of first appending the whole (potentially huge) line and
+            # only then noticing that the cap was exceeded (otherwise ONE
+            # pathological line could blow the memory cap in a single step).
             self._parts.append(line[:remaining])
             self._size += remaining
             self._truncated = True
-            self._parts.append("...[gekuerzt]...")
+            self._parts.append("...[truncated]...")
             return
         self._parts.append(line)
         self._size += len(line) + 1
 
     @property
     def text(self) -> str | None:
-        """Zusammenfassung ohne Zeitstempel-Praefix, oder None wenn der
-        Marker (noch) nicht gesehen wurde."""
+        """Summary without timestamp prefix, or None if the marker has not been
+        seen (yet)."""
         if not self._found:
             return None
         block = "\n".join(self._parts)
@@ -248,12 +248,12 @@ def _utcnow() -> str:
 
 
 def _new_event(etype: str, data: dict | None = None) -> dict:
-    """Ein JSONL-Event: genau ein JSON-Objekt pro Zeile."""
+    """One JSONL event: exactly one JSON object per line."""
     return {"ts": _utcnow(), "type": etype, "data": data or {}}
 
 
 def _append_event(session_id: str, event: dict) -> None:
-    """Haengt EIN Event an die Session-Datei an (Datei wird nie ueberschrieben)."""
+    """Appends ONE event to the session file (the file is never overwritten)."""
     path = SESSIONS_DIR / f"{session_id}.jsonl"
     with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(event, ensure_ascii=False) + "\n")
@@ -262,11 +262,11 @@ def _append_event(session_id: str, event: dict) -> None:
 
 
 def _apply_event(session: dict, event: dict) -> None:
-    """Faltet EINES JSONL-Events in den Session-Zustand ein.
+    """Folds ONE JSONL event into the session state.
 
-    Rekonstruktion = alle Zeilen der Datei in Reihenfolge durch diese Funktion
-    laufen lassen; spaetere Events erweitern/ueberschreiben fruhere. Unbekannte
-    Typen werden bewusst ignoriert (Reserve fuer spaetere Phasen).
+    Reconstruction = running all lines of the file through this function in
+    order; later events extend/overwrite earlier ones. Unknown types are
+    deliberately ignored (reserved for later phases).
     """
     etype = event.get("type")
     data = event.get("data") or {}
@@ -290,8 +290,8 @@ def _apply_event(session: dict, event: dict) -> None:
         stage = next((s for s in session["stages"]
                       if s.get("stage_id") == data.get("stage_id")), None)
         if stage is None:
-            # Defensiv: Terminal-Event ohne stage_started (darf normal nicht vorkommen).
-            log.warning("stage_completed ohne stage_started fuer %s -- selbststaendig gefaltet",
+            # Defensive: terminal event without stage_started (should not normally occur).
+            log.warning("stage_completed without stage_started for %s -- folded on its own",
                         data.get("stage_id"))
             stage = {"stage_id": data.get("stage_id"), "status": None, "exit_code": None,
                      "pid": None, "model": data.get("model"), "project": data.get("project"),
@@ -304,15 +304,15 @@ def _apply_event(session: dict, event: dict) -> None:
 
 
 def _load_sessions() -> dict[str, dict]:
-    """Liest beim Serverstart alle Session-Dateien und rekonstruiert den Zustand
-    aus der vollen Event-Folge (nicht nur die letzte Zeile)."""
+    """Reads all session files on server start and reconstructs the state from
+    the full event sequence (not just the last line)."""
     sessions: dict[str, dict] = {}
     for path in sorted(SESSIONS_DIR.glob("*.jsonl")):
         session: dict = {
             "session_id": path.stem,
             "created_at": None,
-            "messages": [],  # role/content/stage_id/ts aus message_received
-            "stages": [],    # stage_id/status/... aus stage_started + stage_completed
+            "messages": [],  # role/content/stage_id/ts from message_received
+            "stages": [],    # stage_id/status/... from stage_started + stage_completed
         }
         for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
             line = line.strip()
@@ -321,42 +321,42 @@ def _load_sessions() -> dict[str, dict]:
             try:
                 event = json.loads(line)
             except json.JSONDecodeError:
-                log.warning("%s Zeile %d: keine gueltige JSON, Zeile uebersprungen", path.name, lineno)
+                log.warning("%s line %d: not valid JSON, line skipped", path.name, lineno)
                 continue
             _apply_event(session, event)
         if session["created_at"] is None:
-            log.warning("%s: kein session_created-Event, Datei nicht als Session geladen", path.name)
+            log.warning("%s: no session_created event, file not loaded as a session", path.name)
             continue
         for stage in session["stages"]:
             if stage.get("status") == "running":
-                # Zielarchitektur: unklar abgeschlossene Stages (z. B. nach API-Crash)
-                # werden als unvollstaendig markiert und NICHT automatisch neu ausgefuehrt.
-                # (Seit P4 toetet das Job-Object die Baeume bei API-Tod mit; der Status
-                # dokumentiert trotzdem, dass kein sauberes Runner-Urteil vorliegt.)
+                # Target architecture: stages whose completion is unclear (e.g. after an
+                # API crash) are marked incomplete and NOT re-run automatically.
+                # (Since P4 the job object kills the trees along with the API; the status
+                # still documents that there is no clean runner verdict.)
                 stage["status"] = "incomplete"
-                log.warning("%s: Stage %s war beim Neustart noch 'running' -> 'incomplete'",
+                log.warning("%s: stage %s was still 'running' at restart -> 'incomplete'",
                             path.name, stage.get("stage_id"))
         sessions[session["session_id"]] = session
     return sessions
 
 
 # ---------------------------------------------------------------------------
-# P4: Prozessbaum-Kill via Windows-Job-Object (KILL_ON_JOB_CLOSE)
+# P4: process-tree kill via Windows job object (KILL_ON_JOB_CLOSE)
 #
-# Entscheidung Job-Object statt psutil-Prozessbaum-Kill:
-# - atomar auf Kernel-Ebene: TerminateJobObject toetet ALLE Prozesse des Jobs
-#   (Hauptprozess + alle pwsh-Kinder/Enkel, auch solche, die ZWISCHEN Ermittlung
-#   und Kill gestartet werden). Der psutil-Weg (Kinder rekursiv ermitteln +
-#   einzeln terminieren) hat ein Race-Fenster: stage_runner.py kann jederzeit
-#   pwsh starten (Tool-Timeout bis 600 s), spaet gestartete Kinder ueberleben dort.
-# - keine neue Abhaengigkeit: ctypes ist Stdlib; psutil waere eine neue venv-
-#   Abhaengigkeit gegen das KISS-Prinzip der Zielarchitektur.
-# - Nebeneffekt: stirbt der API-Prozess selbst (Crash/Ctrl+C), schliessen sich
-#   die Job-Handles und das OS beendet die Baeume -- keine Orphan-Prozesse mehr
-#   nach einem API-Crash (vor P4 blieb nur die 'incomplete'-Markierung beim
-#   Neustart; der verwaiste Prozess lief einfach weiter).
-# (Bewusste Annahme: ein privilegiertes Prozess koennte theoretisch aus dem Job
-#  "ausbrechen"; fuer ein lokales Single-User-System nicht realistisch.)
+# Decision job object instead of psutil process-tree kill:
+# - atomic at kernel level: TerminateJobObject kills ALL processes of the job
+#   (main process + all pwsh children/grandchildren, including ones started
+#   BETWEEN enumeration and kill). The psutil route (enumerate children
+#   recursively + terminate individually) has a race window: stage_runner.py can
+#   start pwsh at any time (tool timeout up to 600 s), late children survive there.
+# - no new dependency: ctypes is stdlib; psutil would be a new venv dependency
+#   against the KISS principle of the target architecture.
+# - side effect: if the API process itself dies (crash/Ctrl+C), the job handles
+#   close and the OS terminates the trees -- no more orphan processes after an
+#   API crash (before P4 only the 'incomplete' marking on restart was left; the
+#   orphaned process simply kept running).
+# (Deliberate assumption: a privileged process could theoretically "break out"
+#  of the job; not realistic for a local single-user system.)
 # ---------------------------------------------------------------------------
 if sys.platform == "win32":
     import ctypes
@@ -365,9 +365,9 @@ if sys.platform == "win32":
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 
     _JOB_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
-    _JOBOBJECT_EXTENDED_LIMIT_INFORMATION_CLASS = 9  # SetInformationJobObject-Klasse (WinAPI-Enum JobObjectExtendedLimitInformation)
-    _PROCESS_SET_QUOTA = 0x0100                # fuer AssignProcessToJobObject noetig
-    PROCESS_TERMINATE = 0x0001                 # Fallback-Terminierung des Hauptprozesses
+    _JOBOBJECT_EXTENDED_LIMIT_INFORMATION_CLASS = 9  # SetInformationJobObject class (WinAPI enum JobObjectExtendedLimitInformation)
+    _PROCESS_SET_QUOTA = 0x0100                # required for AssignProcessToJobObject
+    PROCESS_TERMINATE = 0x0001                 # fallback termination of the main process
 
     class _JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
         _fields_ = [
@@ -409,20 +409,20 @@ if sys.platform == "win32":
     kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
     kernel32.OpenProcess.restype = wintypes.HANDLE
 
-    # P1-Fix "atomare Job-Zuweisung": subprocess.Popen() unter Windows schliesst
-    # den primaeren Thread-Handle aus CreateProcess SOFORT intern (_execute_child)
-    # und stellt ihn nirgends oeffentlich zur Verfuegung -- es gibt also KEINE
-    # Moeglichkeit, einen per Popen(creationflags=CREATE_SUSPENDED) suspendiert
-    # gestarteten Prozess ueber die Popen-API selbst wieder fortzusetzen (gepr0ft
-    # vor der Implementierung, siehe test-queue/experiment_suspend_resume.py).
-    # Workaround ohne CreateProcessW-Eigenbau: den Thread NACHTRAEGLICH ueber
-    # seine Thread-ID wiederfinden (Toolhelp32Snapshot) und per OpenThread() neu
-    # oeffnen -- braucht nur den (oeffentlichen, bereits genutzten) Prozess-Handle
-    # via proc.pid, keine privaten CPython-Interna. CREATE_SUSPENDED selbst ist in
-    # diesem Python-Build weder als subprocess.CREATE_SUSPENDED noch _winapi.CRE-
-    # ATE_SUSPENDED vorhanden (anders als z. B. CREATE_NO_WINDOW) -- der rohe
-    # Win32-Wert 0x00000004 ist aber ein stabiler, oeffentlich dokumentierter
-    # WinBase.h-Konstantenwert, genau wie CREATE_NO_WINDOW oben lokal definiert.
+    # P1 fix "atomic job assignment": on Windows subprocess.Popen() closes the
+    # primary thread handle from CreateProcess IMMEDIATELY internally
+    # (_execute_child) and does not expose it publicly anywhere -- so there is NO
+    # way to resume a process started suspended via Popen(creationflags=
+    # CREATE_SUSPENDED) through the Popen API itself (checked before the
+    # implementation, see test-queue/experiment_suspend_resume.py).
+    # Workaround without a home-grown CreateProcessW: find the thread AFTERWARDS
+    # via its thread ID (Toolhelp32Snapshot) and reopen it via OpenThread() --
+    # only needs the (public, already used) process handle via proc.pid, no
+    # private CPython internals. CREATE_SUSPENDED itself is not available in this
+    # Python build as subprocess.CREATE_SUSPENDED nor as _winapi.CREATE_SUSPENDED
+    # (unlike e.g. CREATE_NO_WINDOW) -- the raw Win32 value 0x00000004 is however
+    # a stable, publicly documented WinBase.h constant, defined locally just like
+    # CREATE_NO_WINDOW above.
     CREATE_SUSPENDED = 0x00000004
     _TH32CS_SNAPTHREAD = 0x00000004
     _THREAD_SUSPEND_RESUME = 0x0002
@@ -448,17 +448,17 @@ if sys.platform == "win32":
 
 
 def _create_kill_job() -> int:
-    """Legt ein Job-Object mit KILL_ON_JOB_CLOSE an (Handle schliesst = Baum toetet)."""
+    """Creates a job object with KILL_ON_JOB_CLOSE (closing the handle kills the tree)."""
     handle = kernel32.CreateJobObjectW(None, None)
     if not handle:
-        raise OSError(f"CreateJobObjectW fehlgeschlagen (err={ctypes.get_last_error()})")
+        raise OSError(f"CreateJobObjectW failed (err={ctypes.get_last_error()})")
     info = _JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
     info.BasicLimitInformation.LimitFlags = _JOB_LIMIT_KILL_ON_JOB_CLOSE
     if not kernel32.SetInformationJobObject(handle, _JOBOBJECT_EXTENDED_LIMIT_INFORMATION_CLASS,
                                             ctypes.byref(info), ctypes.sizeof(info)):
         err = ctypes.get_last_error()
         kernel32.CloseHandle(handle)
-        raise OSError(f"SetInformationJobObject fehlgeschlagen (err={err})")
+        raise OSError(f"SetInformationJobObject failed (err={err})")
     return handle
 
 
@@ -467,37 +467,36 @@ def _close_job_handle(handle: int) -> None:
 
 
 def _assign_process_to_job(job_handle: int, proc: subprocess.Popen) -> None:
-    """Weist den Stage-Prozess dem Kill-Job zu. Alles, was dieser Prozess SPATER
-    startet (pwsh-Kinder), gehoert automatisch zum selben Job (Kindprozesse erben
-    die Job-Mitgliedschaft) -- damit deckt ein Handle den ganzen Baum ab."""
+    """Assigns the stage process to the kill job. Everything this process starts
+    LATER (pwsh children) automatically belongs to the same job (child processes
+    inherit job membership) -- so one handle covers the whole tree."""
     if kernel32.AssignProcessToJobObject(job_handle, proc._handle):
         return
     err = ctypes.get_last_error()
-    # Fallback: frisches Handle mit den fuer die Zuordnung noetigen Rechten oeffnen
-    # (PROCESS_SET_QUOTA); in der Praxis reicht das Popen-eigene Handle.
+    # Fallback: open a fresh handle with the rights required for the assignment
+    # (PROCESS_SET_QUOTA); in practice Popen's own handle is sufficient.
     h = kernel32.OpenProcess(_PROCESS_SET_QUOTA, False, proc.pid)
     if h and kernel32.AssignProcessToJobObject(job_handle, h):
         kernel32.CloseHandle(h)
         return
     if h:
         kernel32.CloseHandle(h)
-    raise OSError(f"AssignProcessToJobObject fehlgeschlagen (err={err})")
+    raise OSError(f"AssignProcessToJobObject failed (err={err})")
 
 
 def _resume_all_threads(pid: int) -> int:
-    """Gegenstueck zu Popen(creationflags=CREATE_SUSPENDED): findet alle Threads
-    des Prozesses per Toolhelp32-Snapshot (Thread-ID-basiert, da Popen keinen
-    Thread-Handle mehr hat -- siehe Kommentar bei CREATE_SUSPENDED oben) und
-    setzt sie per frisch geoeffnetem Handle fort. Ein frisch suspendiert
-    erstellter Prozess hat genau EINEN Thread (den Hauptthread); wir setzen
-    trotzdem alle zum Prozess gehoerenden Threads fort, nicht nur den ersten
-    gefundenen, um keine Annahme ueber die Thread-Anzahl zu treffen. Liefert die
-    Anzahl erfolgreich fortgesetzter Threads (0 = nichts gefunden/fortgesetzt,
-    vom Aufrufer als Fehler zu behandeln -- der Prozess bliebe sonst fuer immer
-    eingefroren)."""
+    """Counterpart to Popen(creationflags=CREATE_SUSPENDED): finds all threads of
+    the process via a Toolhelp32 snapshot (thread-ID based, since Popen no longer
+    has a thread handle -- see the comment at CREATE_SUSPENDED above) and resumes
+    them via a freshly opened handle. A freshly created suspended process has
+    exactly ONE thread (the main thread); we still resume all threads belonging
+    to the process, not just the first one found, to make no assumption about the
+    thread count. Returns the number of successfully resumed threads (0 = nothing
+    found/resumed, to be treated as an error by the caller -- otherwise the
+    process would stay frozen forever)."""
     snap = kernel32.CreateToolhelp32Snapshot(_TH32CS_SNAPTHREAD, 0)
     if not snap or snap == wintypes.HANDLE(-1).value:
-        raise OSError(f"CreateToolhelp32Snapshot fehlgeschlagen (err={ctypes.get_last_error()})")
+        raise OSError(f"CreateToolhelp32Snapshot failed (err={ctypes.get_last_error()})")
     resumed = 0
     try:
         entry = _THREADENTRY32()
@@ -510,7 +509,7 @@ def _resume_all_threads(pid: int) -> int:
                     if kernel32.ResumeThread(th) != 0xFFFFFFFF:
                         resumed += 1
                     else:
-                        log.warning("ResumeThread fehlgeschlagen fuer Thread %d (err=%d)",
+                        log.warning("ResumeThread failed for thread %d (err=%d)",
                                     entry.th32ThreadID, ctypes.get_last_error())
                     kernel32.CloseHandle(th)
             found = kernel32.Thread32Next(snap, ctypes.byref(entry))
@@ -520,12 +519,12 @@ def _resume_all_threads(pid: int) -> int:
 
 
 class LiveStage:
-    """Registry-Eintrag einer laufenden Stage (Schluessel: session_id).
+    """Registry entry of a running stage (key: session_id).
 
-    Der Worker-Thread (post_message) besitzt proc/job_handle und ist der EINZIGE,
-    der killt und persistiert (unter Session-Lock, genau einmal). /abort setzt nur
-    abort_event und wartet auf done_event -- so bleibt die JSONL-Reihenfolge
-    stage_started/stage_completed unveraendert.
+    The worker thread (post_message) owns proc/job_handle and is the ONLY one
+    that kills and persists (under the session lock, exactly once). /abort only
+    sets abort_event and waits for done_event -- this keeps the JSONL order
+    stage_started/stage_completed unchanged.
     """
     __slots__ = ("stage_id", "proc", "job_handle", "abort_event", "done_event", "job_closed")
 
@@ -533,33 +532,33 @@ class LiveStage:
         self.stage_id = stage_id
         self.proc = proc
         self.job_handle = job_handle
-        self.abort_event = threading.Event()  # /abort -> Worker: bitte beenden
-        self.done_event = threading.Event()   # Worker -> /abort: finalisiert + persistiert
-        # Race-Fix (P1, Punkt A): schuetzt vor TerminateJobObject() auf einem
-        # bereits geschlossenen Handle. NUR unter _live_guard lesen/setzen (siehe
-        # _kill_job_locked/_close_job_handle_locked) -- dadurch sind Terminierung
-        # und Handle-Schliessung gegenseitig ausgeschlossen, nie gleichzeitig.
+        self.abort_event = threading.Event()  # /abort -> worker: please terminate
+        self.done_event = threading.Event()   # worker -> /abort: finalized + persisted
+        # Race fix (P1, point A): protects against TerminateJobObject() on an
+        # already closed handle. Read/set ONLY under _live_guard (see
+        # _kill_job_locked/_close_job_handle_locked) -- this makes termination
+        # and handle closing mutually exclusive, never concurrent.
         self.job_closed = False
 
 
-# Laufzeit-Zustand: In-Memory-Index der persistierten Sessions; wird beim Start
-# von _load_sessions() befuellt und von den Endpunkten erweitert.
+# Runtime state: in-memory index of the persisted sessions; filled at start by
+# _load_sessions() and extended by the endpoints.
 _sessions: dict[str, dict] = {}
 
-# Per-Session-Lock: serialisiert Stages EINER Session (einzelner uvicorn-Prozess,
-# FastAPI laeuft synchrone Endpunkte im Threadpool).
+# Per-session lock: serializes the stages of ONE session (single uvicorn process,
+# FastAPI runs synchronous endpoints in the thread pool).
 _session_locks: dict[str, threading.Lock] = {}
 _session_locks_guard = threading.Lock()
 
-# P4: Registry laufender Stages fuer POST /abort (session_id -> LiveStage, maximal
-# eine pro Session). Bewusst getrennt vom Session-Lock, weil /abort NICHT hinter
-# dem Lock einer laufenden Stage blockieren darf (der Worker haelt ihn bis zum Ende).
+# P4: registry of running stages for POST /abort (session_id -> LiveStage, at most
+# one per session). Deliberately separate from the session lock, because /abort must
+# NOT block behind the lock of a running stage (the worker holds it until the end).
 _live_stages: dict[str, LiveStage] = {}
 _live_guard = threading.Lock()
-# P4: Kill-Intent-Registry (session_id -> Status-Wort "aborted"/"watchdog_timeout").
-# Von _terminate_live_stage unter _live_guard gesetzt (VOR dem Kill, Rule A)
-# und vom Worker bei der Finalisierung gepoppt -- gleiches Lock-Schema wie
-# _live_stages. Der Worker liest/loescht den Eintrag immer unter _live_guard.
+# P4: kill-intent registry (session_id -> status word "aborted"/"watchdog_timeout").
+# Set by _terminate_live_stage under _live_guard (BEFORE the kill, rule A)
+# and popped by the worker during finalization -- same locking scheme as
+# _live_stages. The worker always reads/deletes the entry under _live_guard.
 _kill_intent: dict[str, str] = {}
 
 
@@ -581,15 +580,15 @@ async def lifespan(_app: FastAPI):
     SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
     TASK_TMP_DIR.mkdir(parents=True, exist_ok=True)
     if not STAGE_PYTHON.exists() or not STAGE_RUNNER.exists():
-        log.warning("stage_runner.py unvollstaendig (%s / %s) -- POST /messages wird 500 liefern",
+        log.warning("stage_runner.py incomplete (%s / %s) -- POST /messages will return 500",
                     STAGE_PYTHON, STAGE_RUNNER)
     _sessions.update(_load_sessions())
     if _sessions:
-        log.info("%d Session(en) aus %s rekonstruiert", len(_sessions), SESSIONS_DIR)
+        log.info("%d session(s) reconstructed from %s", len(_sessions), SESSIONS_DIR)
     yield
 
 
-# Nur Loopback: lokales Single-User-System, keine Authentifizierung (Architektur-constraint).
+# Loopback only: local single-user system, no authentication (architecture constraint).
 app = FastAPI(
     title="Reaper API",
     version=__version__,
@@ -604,19 +603,19 @@ WEB_DIR = APP_DIR / "web"
 
 @app.get("/", include_in_schema=False)
 def index() -> FileResponse:
-    """Liefert die einseitige Chat-GUI (web/index.html) aus; spricht NUR die
-    oeffentlichen Endpunkte dieser API an (Sessions/Messages/Abort), kennt
-    stage_runner.py/Ollama/Basic-Memory nicht."""
+    """Serves the single-page chat GUI (web/index.html); it talks ONLY to the
+    public endpoints of this API (sessions/messages/abort) and knows nothing about
+    stage_runner.py/Ollama/Basic Memory."""
     return FileResponse(WEB_DIR / "index.html")
 
 
-# Lokal eingebundene GUI-Bibliotheken (marked, DOMPurify, highlight.js) -- rein
-# statisch, keine CDN-Abhaengigkeit im Betrieb.
+# Locally bundled GUI libraries (marked, DOMPurify, highlight.js) -- purely
+# static, no CDN dependency at runtime.
 app.mount("/vendor", StaticFiles(directory=WEB_DIR / "vendor"), name="vendor")
 
 
-# Aus REAPER_OLLAMA_URL (bzw. ollama_url in config.toml), Default 127.0.0.1:11434.
-# Nur fuer die Diagnose-Ampel: stage_runner.py nutzt seine eigene, fest eingetragene URL.
+# From REAPER_OLLAMA_URL (or ollama_url in config.toml), default 127.0.0.1:11434.
+# Only for the diagnostic status light: stage_runner.py uses its own hard-coded URL.
 OLLAMA_HEALTH_HOST, OLLAMA_HEALTH_PORT = ollama_host_port()
 
 
@@ -630,11 +629,11 @@ def _tcp_reachable(host: str, port: int, timeout_s: float = 1.0) -> bool:
 
 @app.get("/health", include_in_schema=False)
 def health() -> dict:
-    """Rein diagnostischer Status fuer die GUI-Ampel -- KEINE funktionale
-    Abhaengigkeit: main.py ruft Ollama nie selbst auf (das macht ausschliesslich
-    der stage_runner.py-Subprozess), hier wird nur per TCP-Connect geprueft, ob
-    der Port offen ist, damit die GUI anzeigen kann, warum eine Stage haengen
-    wuerde, BEVOR der Nutzer eine Nachricht abschickt."""
+    """Purely diagnostic status for the GUI status light -- NO functional
+    dependency: main.py never calls Ollama itself (that is done exclusively by
+    the stage_runner.py subprocess); here only a TCP connect checks whether the
+    port is open, so the GUI can show why a stage would hang BEFORE the user
+    sends a message."""
     return {
         "api": "ok",
         "ollama": "ok" if _tcp_reachable(OLLAMA_HEALTH_HOST, OLLAMA_HEALTH_PORT) else "down",
@@ -643,63 +642,62 @@ def health() -> dict:
 
 
 class MessageIn(BaseModel):
-    """Body von POST /sessions/{id}/messages. model/project/think sind uebersteuerbar;
-    Defaults = lokal vorhandenes Ollama-Modell, Standard-Memory-Projekt, Reasoning AUS
-    (deterministisch; True = Modell denkt mit -- bei Qwen3/Q5 praktisch unbegrenzt)."""
+    """Body of POST /sessions/{id}/messages. model/project/think can be overridden;
+    defaults = locally available Ollama model, standard memory project, reasoning OFF
+    (deterministic; True = the model thinks along -- practically unbounded with Qwen3/Q5)."""
 
-    message: str = Field(min_length=1, description="Nutzer-Task-Text (= Stage-Auftrag)")
+    message: str = Field(min_length=1, description="User task text (= stage task)")
     model: str = Field(default=DEFAULT_MODEL, min_length=1,
-                       description=f"Ollama-Modellname (Default {DEFAULT_MODEL})")
+                       description=f"Ollama model name (default {DEFAULT_MODEL})")
     project: str = Field(default=DEFAULT_PROJECT, min_length=1,
-                         description=f"Basic-Memory-Projekt (Default {DEFAULT_PROJECT})")
-    # think wird IMMER explizit an stage_runner.py durchgereicht (--think on/off):
-    # fehlt der Key, laeuft der Runner mit "auto" und das Modell nutzt seinen eigenen
-    # Reasoning-Default (Qwen3/Q5: praktisch unbegrenzt) -- E2E-Bug, fix 2026-10-16.
+                         description=f"Basic Memory project (default {DEFAULT_PROJECT})")
+    # think is ALWAYS passed to stage_runner.py explicitly (--think on/off):
+    # if the key is missing, the runner runs with "auto" and the model uses its own
+    # reasoning default (Qwen3/Q5: practically unbounded) -- E2E bug, fixed 2026-10-16.
     think: bool = Field(default=False,
-                        description="Reasoning/Thinking des Modells (Ollama 'think'); Default aus")
+                        description="Model reasoning/thinking (Ollama 'think'); off by default")
 
     @field_validator("message")
     @classmethod
     def _non_blank(cls, v: str) -> str:
         if not v.strip():
-            raise ValueError("message darf nicht leer oder nur Leerraum sein")
+            raise ValueError("message must not be empty or whitespace only")
         return v
 
 
 class BoundedSseQueue:
-    """Begrenzte SSE-Event-Queue mit zwei Zustellklassen:
+    """Bounded SSE event queue with two delivery classes:
 
-    - log_line (ueber put_log_line): best-effort, NIE blockierend. Bei voller
-      Queue wird die Zeile verworfen und nur gezaehlt (kein queue.put() mit
-      unbegrenzter Wartezeit, kein Einzel-Warning pro Zeile -- Anforderung 3/4).
-      Der stderr-Drainer (_drain_capped) bleibt dadurch immer lauffaehig, auch
-      wenn der SSE-Client nicht konsumiert; die stderr-Pipe wird unabhaengig
-      vom Consumer weiter geleert (kein Pipe-Deadlock-Risiko).
-    - Prioritaet (ueber put_priority): stage_started/stage_completed/Sentinel
-      MUESSEN ankommen -- bei voller Queue wird GEZIELT ein log_line-Eintrag
-      verdraengt, NIE ein anderes Prioritaets-Event. Blockiert dabei NIE
-      unbegrenzt, da die Queue stets endlich ist und verdraengt statt zu warten.
+    - log_line (via put_log_line): best effort, NEVER blocking. When the queue
+      is full the line is dropped and only counted (no queue.put() with unbounded
+      waiting, no individual warning per line -- requirement 3/4). The stderr
+      drainer (_drain_capped) therefore always stays runnable, even if the SSE
+      client does not consume; the stderr pipe keeps being drained independently
+      of the consumer (no pipe-deadlock risk).
+    - priority (via put_priority): stage_started/stage_completed/sentinel
+      MUST arrive -- when the queue is full a log_line entry is evicted
+      SPECIFICALLY, NEVER another priority event. Never blocks indefinitely,
+      since the queue is always finite and evicts instead of waiting.
 
-    KORREKTUR (gefunden durch gezielten Test, siehe test_bounded_queue.py
-    test_priority_eviction_never_removes_priority_event): die urspruengliche
-    Fassung verdraengte blind den AELTESTEN Eintrag, egal welchen Typs. Da
-    stage_started IMMER als erstes Element eingereiht wird (_start_stage, vor
-    den Drainer-Threads), ist es bei einer spaeter voll gelaufenen Queue exakt
-    der aelteste Eintrag -- ein nachfolgender put_priority(stage_completed)
-    haette stage_started dadurch VERDRAENGT statt eines log_line-Eintrags.
-    _evict_one_log_line_locked() sucht deshalb gezielt den ersten log_line-
-    Eintrag (reiht uebersprungene Nicht-log_line-Eintraege in Original-
-    reihenfolge wieder ein) statt blind das Kopfelement zu entfernen.
+    CORRECTION (found by a targeted test, see test_bounded_queue.py
+    test_priority_eviction_never_removes_priority_event): the original version
+    blindly evicted the OLDEST entry, regardless of its type. Since stage_started
+    is ALWAYS enqueued as the first element (_start_stage, before the drainer
+    threads), it is exactly the oldest entry in a queue that later fills up -- a
+    subsequent put_priority(stage_completed) would therefore have EVICTED
+    stage_started instead of a log_line entry. _evict_one_log_line_locked()
+    therefore specifically looks for the first log_line entry (re-enqueuing
+    skipped non-log_line entries in their original order) instead of blindly
+    removing the head element.
 
-    Alle mutierenden Operationen (put_log_line, put_priority/Verdraengung,
-    Dropped-Zaehler) laufen unter EINEM gemeinsamen Lock, damit die Verdraengung
-    (mehrschrittig: Queue durchsuchen, Nicht-Opfer wieder einreihen) atomar
-    gegenueber anderen Producern ist -- sonst koennte ein paralleler
-    put_log_line()-Aufruf mitten in der Suche einen weiteren Eintrag einfuegen
-    und das Ergebnis verfaelschen. get() (Consumer-Seite) bleibt lockfrei,
-    queue.Queue ist dafuer bereits intern threadsicher; die Verdraengung ist mit
-    maxsize=1000 ein kurzer, begrenzter Scan (Mikrosekunden), kein
-    unbegrenztes Warten."""
+    All mutating operations (put_log_line, put_priority/eviction, dropped
+    counter) run under ONE shared lock, so the eviction (multi-step: search the
+    queue, re-enqueue non-victims) is atomic with respect to other producers --
+    otherwise a concurrent put_log_line() call could insert another entry in the
+    middle of the search and corrupt the result. get() (consumer side) stays
+    lock-free, queue.Queue is already thread-safe internally for that; with
+    maxsize=1000 the eviction is a short, bounded scan (microseconds), not an
+    unbounded wait."""
 
     __slots__ = ("_q", "_dropped", "_lock")
 
@@ -723,24 +721,23 @@ class BoundedSseQueue:
                     return
                 except queue.Full:
                     if not self._evict_one_log_line_locked():
-                        # Praktisch unerreichbar: pro Stage gibt es hoechstens 4
-                        # Prioritaets-Events (stage_started, log_dropped,
-                        # stage_completed, Sentinel) bei maxsize=1000 -- es gibt
-                        # also immer mindestens einen log_line-Eintrag zum
-                        # Verdraengen. Letzter Ausweg (z. B. bei absichtlich
-                        # winziger maxsize in einem Test), damit put_priority()
-                        # NIE blockiert: aeltesten Eintrag verdraengen.
+                        # Practically unreachable: there are at most 4 priority
+                        # events per stage (stage_started, log_dropped,
+                        # stage_completed, sentinel) with maxsize=1000 -- so there
+                        # is always at least one log_line entry to evict. Last
+                        # resort (e.g. with a deliberately tiny maxsize in a test),
+                        # so that put_priority() NEVER blocks: evict the oldest entry.
                         try:
                             self._q.get_nowait()
                         except queue.Empty:
                             pass
 
     def _evict_one_log_line_locked(self) -> bool:
-        """Aufrufer haelt bereits self._lock. Sucht vom Kopf der Queue aus den
-        ERSTEN log_line-Eintrag und entfernt NUR diesen; alle dabei
-        uebersprungenen Nicht-log_line-Eintraege (stage_started etc.) werden in
-        urspruenglicher Reihenfolge wieder eingereiht. True, wenn ein
-        log_line-Eintrag entfernt wurde (Platz gemacht), sonst False."""
+        """Caller already holds self._lock. Searches from the head of the queue
+        for the FIRST log_line entry and removes ONLY that one; all non-log_line
+        entries skipped along the way (stage_started etc.) are re-enqueued in
+        their original order. True if a log_line entry was removed (room made),
+        otherwise False."""
         held: list = []
         found = False
         while True:
@@ -751,47 +748,47 @@ class BoundedSseQueue:
             if not found and old is not None and old[0] == "log_line":
                 found = True
                 self._dropped += 1
-                continue  # NICHT wieder einreihen -- das macht den Platz frei
+                continue  # do NOT re-enqueue -- this frees the slot
             held.append(old)
         for h in held:
-            self._q.put_nowait(h)  # passt immer wieder rein -- wir haben max. 1 entfernt
+            self._q.put_nowait(h)  # always fits again -- we removed at most 1
         return found
 
     def pop_dropped(self) -> int:
-        """Liefert die Anzahl seit dem letzten Aufruf verworfener log_line-Events
-        und setzt den Zaehler zurueck -- fuer das optionale log_dropped-Event."""
+        """Returns the number of log_line events dropped since the last call and
+        resets the counter -- for the optional log_dropped event."""
         with self._lock:
             n = self._dropped
             self._dropped = 0
             return n
 
     def get(self, timeout: float):
-        """Wie queue.Queue.get(timeout=...): blockiert bis Item oder wirft
-        queue.Empty nach Ablauf -- unveraendertes Consumer-Verhalten."""
+        """Like queue.Queue.get(timeout=...): blocks until an item arrives or
+        raises queue.Empty on timeout -- unchanged consumer behavior."""
         return self._q.get(timeout=timeout)
 
 
 def _drain_capped(stream, chunks: list[bytes], limit: int,
                    events: "BoundedSseQueue | None" = None,
                    summary_capture: "_SummaryCapture | None" = None) -> None:
-    """Leert eine Pipe DURCHGAENGIG waehrend der Subprozess laeuft (voller Puffer =
-    Deadlock) und haelt nur die letzten `limit` Bytes (Tail) fuer Event/Response).
-    Mit `events`: pusht zusaetzlich JEDE vollstaendige Zeile SOFORT als eigenes
-    SSE-Event ('log_line') -- live-Sichtbarkeit in der GUI, z. B. ob/wann
-    run_substage laeuft, ohne auf das Stage-Ende zu warten. Bewusst nur fuer
-    stderr genutzt (stage_runner.py._log() schreibt dorthin, stdout ist leer).
-    Mit `summary_capture`: fuettert dieselben, bereits vollstaendig decodierten
-    Zeilen zusaetzlich live in die finish_stage-Mitschrift (P1-Fix: Ergebnis-
-    verlust bei langen Logs) -- unabhaengig vom Byte-Deckel `limit` oben, der
-    nur den allgemeinen Diagnose-Tail (die jeweils LETZTEN `limit` Bytes)
-    begrenzt und bei umfangreichem Log die Zusammenfassung verdraengen kann.
-    Eine letzte Zeile ohne abschliessendes '\n' wird beim Pipe-Ende ebenfalls
-    verarbeitet; einzelne Zeilen sind auf _LINE_BUFFER_LIMIT Bytes begrenzt."""
+    """Drains a pipe CONTINUOUSLY while the subprocess runs (full buffer =
+    deadlock) and keeps only the last `limit` bytes (tail) for event/response.
+    With `events`: additionally pushes EVERY complete line IMMEDIATELY as its own
+    SSE event ('log_line') -- live visibility in the GUI, e.g. whether/when
+    run_substage runs, without waiting for the stage to end. Deliberately used
+    only for stderr (stage_runner.py._log() writes there, stdout is empty).
+    With `summary_capture`: additionally feeds the same, already fully decoded
+    lines live into the finish_stage capture (P1 fix: result loss with long
+    logs) -- independent of the byte cap `limit` above, which only bounds the
+    general diagnostic tail (the LAST `limit` bytes) and can push the summary
+    out with an extensive log.
+    A last line without a trailing '\n' is also processed when the pipe ends;
+    individual lines are limited to _LINE_BUFFER_LIMIT bytes."""
     buf = bytearray()
-    line_truncated = False  # aktuelle Zeile hat _LINE_BUFFER_LIMIT schon erreicht
+    line_truncated = False  # current line has already reached _LINE_BUFFER_LIMIT
 
     def _emit_line() -> None:
-        # Eine (ggf. gekappte) Zeile an Live-Events und Summary-Capture geben.
+        # Hand a (possibly capped) line to live events and the summary capture.
         text = bytes(buf).decode("utf-8", errors="replace").rstrip("\r")
         if line_truncated:
             text += _LINE_TRUNCATED_SUFFIX
@@ -801,9 +798,9 @@ def _drain_capped(stream, chunks: list[bytes], limit: int,
             events.put_log_line({"text": text})
 
     def _append_capped(segment: bytes) -> None:
-        # Haengt an die aktuelle Zeile hoechstens bis _LINE_BUFFER_LIMIT Bytes an;
-        # der Rest einer pathologisch langen Zeile wird bis zum naechsten '\n'
-        # verworfen (der Byte-Tail oben behaelt ihn unabhaengig davon).
+        # Appends at most up to _LINE_BUFFER_LIMIT bytes to the current line;
+        # the rest of a pathologically long line is discarded up to the next '\n'
+        # (the byte tail above keeps it independently).
         nonlocal line_truncated
         if line_truncated:
             return
@@ -817,11 +814,11 @@ def _drain_capped(stream, chunks: list[bytes], limit: int,
     try:
         total = 0
         while True:
-            # read1() statt read(): read() auf einem BufferedReader versucht, die
-            # VOLLEN 65536 Bytes zu sammeln (blockiert also, bis entweder so viel
-            # Output anfiel oder die Pipe schloss) -- fuer Live-Streaming unbrauchbar,
-            # eine Stage mit wenig Output haette NIE eine Zeile live gezeigt, bis sie
-            # fertig war. read1() liefert sofort, was verfuegbar ist (mind. 1 Byte).
+            # read1() instead of read(): read() on a BufferedReader tries to collect
+            # the FULL 65536 bytes (so it blocks until either that much output was
+            # produced or the pipe closed) -- useless for live streaming, a stage with
+            # little output would NEVER have shown a line live until it was done.
+            # read1() returns immediately with whatever is available (at least 1 byte).
             chunk = stream.read1(65536)
             if not chunk:
                 break
@@ -830,14 +827,13 @@ def _drain_capped(stream, chunks: list[bytes], limit: int,
             while total > limit and len(chunks) > 1:
                 total -= len(chunks.pop(0))
             if events is not None or summary_capture is not None:
-                # Split ausschliesslich auf dem Byte 0x0A: eine UTF-8-
-                # Mehrbyte-Sequenz enthaelt dieses Byte nie als Fortsetzungs-
-                # oder Startbyte, decode() laeuft hier also immer auf einer
-                # vollstaendigen, nie an einer Chunk-Grenze zerschnittenen
-                # Zeile -- Marker-Erkennung wie Live-Events sind dadurch
-                # unempfindlich gegen beliebige read1()-Chunk-Grenzen.
-                # (Ausnahme: eine wegen _LINE_BUFFER_LIMIT gekappte Zeile kann
-                # mitten in einem Zeichen enden -> errors="replace".)
+                # Split exclusively on byte 0x0A: a UTF-8 multi-byte sequence never
+                # contains this byte as a continuation or start byte, so decode()
+                # here always runs on a complete line that was never cut at a chunk
+                # boundary -- marker detection and live events are therefore
+                # insensitive to arbitrary read1() chunk boundaries.
+                # (Exception: a line capped because of _LINE_BUFFER_LIMIT can
+                # end in the middle of a character -> errors="replace".)
                 start = 0
                 while True:
                     nl = chunk.find(b"\n", start)
@@ -850,16 +846,16 @@ def _drain_capped(stream, chunks: list[bytes], limit: int,
                     line_truncated = False
                     start = nl + 1
     except Exception as exc:
-        log.warning("Pipe-Drain unterbrochen: %s", exc)
+        log.warning("Pipe drain interrupted: %s", exc)
     finally:
-        # Letzte Zeile ohne abschliessendes '\n' (z. B. Runner endet mit
-        # print(..., end="") oder wird mitten in der Zeile beendet) nicht
-        # verwerfen -- sonst fehlt u. U. die letzte Zeile der Zusammenfassung.
+        # Do not discard a last line without a trailing '\n' (e.g. the runner ends
+        # with print(..., end="") or is terminated mid-line) -- otherwise the last
+        # line of the summary might be missing.
         if (buf or line_truncated) and (events is not None or summary_capture is not None):
             try:
                 _emit_line()
             except Exception as exc:
-                log.warning("Letzte Pipe-Zeile nicht verarbeitbar: %s", exc)
+                log.warning("Last pipe line could not be processed: %s", exc)
         try:
             stream.close()
         except OSError:
@@ -867,7 +863,7 @@ def _drain_capped(stream, chunks: list[bytes], limit: int,
 
 
 def _delete_quiet(path: str | None) -> None:
-    """Temp-Taskdatei loeschen -- Erfolg UND Fehlerfall (P3-Pflicht)."""
+    """Delete the temp task file -- on success AND on failure (P3 requirement)."""
     if path is None:
         return
     try:
@@ -875,73 +871,73 @@ def _delete_quiet(path: str | None) -> None:
     except FileNotFoundError:
         pass
     except OSError as exc:
-        log.warning("Temp-Task-Datei %s nicht loeschbar: %s", path, exc)
+        log.warning("Temp task file %s could not be deleted: %s", path, exc)
 
 
 def _extract_summary(rc: int, stderr_tail: str, captured: str | None = None) -> str:
-    """finish_stage-Zusammenfassung als Anzeigetext.
+    """finish_stage summary as display text.
 
-    Der STATUS kommt NIE aus Logtext (immer Exit-Code); hier wird nur der Text nach
-    dem '=== STAGE BEENDET'-Marker als Anzeige uebernommen (Zielarchitektur v1).
+    The STATUS NEVER comes from log text (always the exit code); here only the text
+    after the '=== STAGE BEENDET' marker is taken over for display (target arch v1).
 
-    `captured` (P1-Fix: Ergebnisverlust bei langen Logs) ist die LIVE beim Draino
-    mitgeschnittene Zusammenfassung (siehe _SummaryCapture), unabhaengig vom
-    begrenzten `stderr_tail`-Diagnose-Tail -- wenn vorhanden, hat sie Vorrang.
-    Die Tail-Suche unten bleibt als Fallback (z. B. falls kein Capture-Objekt
-    uebergeben wurde) sowie fuer die rc-basierten Fallback-Texte unten.
+    `captured` (P1 fix: result loss with long logs) is the summary captured LIVE
+    while draining (see _SummaryCapture), independent of the bounded
+    `stderr_tail` diagnostic tail -- if present, it takes precedence.
+    The tail search below remains as a fallback (e.g. if no capture object was
+    passed) as well as for the rc-based fallback texts below.
     """
     if captured:
         return captured
     idx = stderr_tail.find(_FINISH_MARKER)
     if idx != -1:
         block = stderr_tail[idx + len(_FINISH_MARKER):]
-        nl = block.find("\n")  # Rest der Markerzeile "(success=...)" verwerfen
+        nl = block.find("\n")  # discard the rest of the marker line "(success=...)"
         if nl != -1:
             block = block[nl + 1:]
         text = _TS_PREFIX.sub("", block).strip()
         if text:
             return text
     if rc == 0:
-        return "(finish_stage-Zusammenfassung nicht im stderr-Tail gefunden)"
+        return "(finish_stage summary not found in the stderr tail)"
     fallback = {
-        1: "Runner-Fehler oder success=false (Details in stderr_tail).",
-        2: "Abgebrochen: Wall-Clock-Limit (20 min) erreicht, kein finish_stage-Aufruf.",
-        3: "Abgebrochen: maximale Iterationszahl erreicht, kein finish_stage-Aufruf.",
+        1: "Runner error or success=false (details in stderr_tail).",
+        2: "Aborted: wall-clock limit (20 min) reached, no finish_stage call.",
+        3: "Aborted: maximum number of iterations reached, no finish_stage call.",
     }
-    return fallback.get(rc, f"Unbekannter Exit-Code {rc} (Details in stderr_tail).")
+    return fallback.get(rc, f"Unknown exit code {rc} (details in stderr_tail).")
 
 # ---------------------------------------------------------------------------
-# Endpunkte + Stage-Worker (P3-Logik; P4: Kill-Job pro Stage, abort_event,
-# aktiver Watchdog, POST /abort)
+# Endpoints + stage worker (P3 logic; P4: kill job per stage, abort_event,
+# active watchdog, POST /abort)
 # ---------------------------------------------------------------------------
 
 
 def _kill_job(job_handle: int) -> None:
-    """TerminateJobObject auf dem gehaltenen Job-Handle: toetet ALLE Prozesse
-    des Jobs atomar (Hauptprozess + alle Kindprozesse inkl. pwsh-Stages).
-    Nur der /abort-Handler und der Watchdog rufen das -- nie der Worker."""
+    """TerminateJobObject on the held job handle: kills ALL processes of the job
+    atomically (main process + all child processes incl. pwsh stages).
+    Only the /abort handler and the watchdog call this -- never the worker."""
     if not kernel32.TerminateJobObject(job_handle, 1):
-        log.warning("TerminateJobObject fehlgeschlagen (err=%d) -- Baum laeuft ggf. weiter",
+        log.warning("TerminateJobObject failed (err=%d) -- tree may still be running",
                     ctypes.get_last_error())
 
 
 def _kill_job_locked(live: "LiveStage") -> None:
-    """Race-Fix (P1, Punkt A): Aufrufer MUSS bereits _live_guard halten. Ruft
-    TerminateJobObject nur auf, wenn das Handle noch nicht geschlossen wurde --
-    verhindert, dass ein Kill auf ein bereits (von _finalize_stage) geschlossenes
-    Handle trifft (Use-after-close/Handle-Reuse). Da sowohl diese Funktion als
-    auch _close_job_handle_locked() ausschliesslich unter _live_guard laufen,
-    sind Terminierung und Schliessen des Handles gegenseitig ausgeschlossen."""
+    """Race fix (P1, point A): caller MUST already hold _live_guard. Calls
+    TerminateJobObject only if the handle has not been closed yet -- prevents a
+    kill from hitting a handle already closed (by _finalize_stage)
+    (use-after-close/handle reuse). Since both this function and
+    _close_job_handle_locked() run exclusively under _live_guard, terminating
+    and closing the handle are mutually exclusive."""
     if live.job_closed:
         return
     _kill_job(live.job_handle)
 
 
 def _close_job_handle_locked(live: "LiveStage") -> None:
-    """Race-Fix (P1, Punkt A): Aufrufer MUSS bereits _live_guard halten. Schliesst
-    das Handle hoechstens einmal (job_closed-Flag) -- danach kann _kill_job_locked
-    nie wieder auf dieses Handle zugreifen, egal welcher Thread als naechstes
-    _live_guard bekommt."""
+    """Race fix (P1, point A): caller MUST already hold _live_guard. Closes the
+    handle at most once (job_closed flag) -- after that _kill_job_locked can
+    never touch this handle again, no matter which thread gets _live_guard
+    next."""
     if live.job_closed:
         return
     _close_job_handle(live.job_handle)
@@ -949,25 +945,25 @@ def _close_job_handle_locked(live: "LiveStage") -> None:
 
 
 def _terminate_live_stage(session_id: str, status: str) -> LiveStage | None:
-    """Der EINZIGE Weg, eine laufende Stage zu toeten -- POST /abort UND
-    Watchdog nutzen exakt diesen Mechanismus. Liefert die LiveStage oder None,
-    wenn keine aktive Stage existiert ODER das natuerliche Ende den
-    Linearisierungspunkt bereits zuerst erreicht hat (Punkt C, zu spaet).
+    """The ONLY way to kill a running stage -- POST /abort AND the watchdog use
+    exactly this mechanism. Returns the LiveStage, or None if there is no active
+    stage OR the natural end has already reached the linearization point first
+    (point C, too late).
 
-    Race-Fix (P1): kill-intent setzen, abort_event setzen UND der eigentliche
-    Kill (_kill_job_locked) laufen jetzt alle unter DEMSELBEN _live_guard-Aufruf
-    -- vorher lag der Kill ausserhalb des Locks und konnte mit einem parallelen
-    _close_job_handle() in _finalize_stage um das Handle wettlaufen (Punkt A,
-    Use-after-close/Handle-Reuse). _kill_intent ist jetzt die EINZIGE
-    verbindliche Entscheidung (siehe _NATURAL/_finalize_stage):
-    - bereits _NATURAL: natuerliches Ende hat den Linearisierungspunkt zuerst
-      erreicht -- Abort kommt zu spaet, Ergebnis bleibt unveraendert (Punkt C).
-      Kein Kill noetig, der Prozess ist bereits (per _wait_proc bestaetigt) tot.
-    - bereits ein anderer Status: ein frueherer Abbruchgrund hat gewonnen
-      (Punkt B, erster gewinnt) -- wir ueberschreiben ihn NICHT, setzen
-      abort_event/Kill aber trotzdem erneut (idempotent, schadet nicht, falls
-      der erste Versuch den Prozess noch nicht erreicht hat).
-    - None (offen): wir sind die ersten -- unser `status` gewinnt verbindlich."""
+    Race fix (P1): setting the kill intent, setting abort_event AND the actual
+    kill (_kill_job_locked) now all run under THE SAME _live_guard acquisition
+    -- previously the kill was outside the lock and could race a concurrent
+    _close_job_handle() in _finalize_stage for the handle (point A,
+    use-after-close/handle reuse). _kill_intent is now the ONLY binding
+    decision (see _NATURAL/_finalize_stage):
+    - already _NATURAL: the natural end reached the linearization point first --
+      the abort is too late, the result stays unchanged (point C). No kill
+      needed, the process is already dead (confirmed by _wait_proc).
+    - already another status: an earlier abort reason won (point B, first one
+      wins) -- we do NOT overwrite it, but still set abort_event/kill again
+      (idempotent, harmless in case the first attempt has not reached the
+      process yet).
+    - None (open): we are first -- our `status` wins bindingly."""
     with _live_guard:
         live = _live_stages.get(session_id)
         if live is None:
@@ -983,18 +979,18 @@ def _terminate_live_stage(session_id: str, status: str) -> LiveStage | None:
 
 
 def _watchdog_thread(session_id: str, live: LiveStage, start_mono: float) -> None:
-    """Pro-Stage-Watchdog (P4): waecht exakt nach STAGE_TIMEOUT_S auf -- oder
-    frueher, wenn der Worker die Stage fertig finalisiert hat (done_event wird
-    am Ende gesetzt) -- und toetet dann den Prozessbaum AKTIV statt die Stage
-    laufen zu lassen (vor P4: nur Status='incomplete' gesetzt). Normal feuert
-    der Runner zuerst selbst (20-min-Notbremse, rc=2); hier endet nur ein
-    echter Hang."""
+    """Per-stage watchdog (P4): wakes up exactly after STAGE_TIMEOUT_S -- or
+    earlier if the worker has finished finalizing the stage (done_event is set
+    at the end) -- and then kills the process tree ACTIVELY instead of letting
+    the stage run (before P4: only status='incomplete' was set). Normally the
+    runner fires first on its own (20 min emergency brake, rc=2); only a real
+    hang ends here."""
     remaining = STAGE_TIMEOUT_S - (time.monotonic() - start_mono)
     if remaining > 0:
         live.done_event.wait(timeout=remaining)
     if live.done_event.is_set():
-        return  # Stage normal fertig -- nichts zu tun
-    log.warning("Watchdog: Stage %s (Session %s) uebersteigt %.0f s -- Job killen",
+        return  # stage finished normally -- nothing to do
+    log.warning("Watchdog: stage %s (session %s) exceeds %.0f s -- killing job",
                 live.stage_id, session_id, STAGE_TIMEOUT_S)
     term = _terminate_live_stage(session_id, STATUS_WATCHDOG)
     if term is not None:
@@ -1002,22 +998,21 @@ def _watchdog_thread(session_id: str, live: LiveStage, start_mono: float) -> Non
 
 
 def _wait_proc(proc: subprocess.Popen, session_id: str, deadline: float) -> int | None:
-    """proc.poll() in einer 1-s-Schleife statt blockierendem wait (P4-Spec): der
-    Worker beobachtet das Ende ohne unbegrenzte Blockade. WICHTIG: poll(),
-    NICHT wait(timeout) -- wait(timeout) RAEST TimeoutExpired, solange der
-    Prozess laeuft (er liefert nie None), und haette jede Stage sofort zum
-    Crash gebracht. Liefert den Exit-Code; ist die Deadline ueberschritten,
-    toetet der Worker EINMALIG selbst via _terminate_live_stage (gleicher
-    Mechanismus wie /abort) -- nur Backstop fuer den Fall, dass der Watchdog
-    aus einem Grund nicht da ist."""
+    """proc.poll() in a 1 s loop instead of a blocking wait (P4 spec): the worker
+    observes the end without blocking indefinitely. IMPORTANT: poll(), NOT
+    wait(timeout) -- wait(timeout) RAISES TimeoutExpired while the process is
+    running (it never returns None) and would have crashed every stage
+    immediately. Returns the exit code; if the deadline is exceeded, the worker
+    kills ONCE by itself via _terminate_live_stage (same mechanism as /abort) --
+    only a backstop in case the watchdog is not there for some reason."""
     backstop_done = False
     while True:
         rc = proc.poll()
         if rc is not None:
             return rc
         if time.monotonic() >= deadline and not backstop_done:
-            log.error("Stage (Session %s) ueber Deadline, Watchdog noch nicht da -- "
-                      "Backstop-Kill vom Worker", session_id)
+            log.error("Stage (session %s) past deadline, watchdog not there yet -- "
+                      "backstop kill by the worker", session_id)
             _terminate_live_stage(session_id, STATUS_WATCHDOG)
             backstop_done = True
         time.sleep(1.0)
@@ -1025,8 +1020,8 @@ def _wait_proc(proc: subprocess.Popen, session_id: str, deadline: float) -> int 
 
 @app.post("/sessions", status_code=201)
 def create_session() -> dict:
-    """Neue Chat-Session anlegen (P3, Logik unveraendert). Das
-    session_created-Event ist die Persistenzbasis der Rekonstruktion."""
+    """Create a new chat session (P3, logic unchanged). The session_created event
+    is the persistence basis of the reconstruction."""
     session_id = str(uuid.uuid4())
     session = {"session_id": session_id, "created_at": _utcnow(),
                "messages": [], "stages": []}
@@ -1037,7 +1032,7 @@ def create_session() -> dict:
 
 @app.get("/sessions/{session_id}")
 def get_session(session_id: str) -> dict:
-    """Session lesen (P3, Logik unveraendert); 404 bei unbekannter id."""
+    """Read a session (P3, logic unchanged); 404 for an unknown id."""
     session = _sessions.get(session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="unknown session_id")
@@ -1046,9 +1041,9 @@ def get_session(session_id: str) -> dict:
 
 @app.get("/sessions/{session_id}/context", include_in_schema=False)
 def get_context_preview(session_id: str) -> dict:
-    """Zeigt, was der begrenzte Kontext (_build_task_text) JETZT einer naechsten
-    Nachricht voranstellen wuerde -- reine Vorschau, startet keine Stage. Fuer
-    das Kontext-Panel der GUI."""
+    """Shows what the limited context (_build_task_text) would prepend to a next
+    message RIGHT NOW -- a pure preview, starts no stage. For the context panel
+    of the GUI."""
     session = _sessions.get(session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="unknown session_id")
@@ -1063,8 +1058,8 @@ def get_context_preview(session_id: str) -> dict:
 
 @dataclass
 class StageContext:
-    """Zwischenstand einer Stage zwischen Startphase (Request-Thread, unter
-    Session-Lock) und Finalisierungsphase (Worker-Thread, ohne Lock)."""
+    """Intermediate state of a stage between the start phase (request thread,
+    under the session lock) and the finalization phase (worker thread, no lock)."""
 
     session_id: str
     body: MessageIn
@@ -1083,103 +1078,102 @@ class StageContext:
 
 
 def _sse_frame(etype: str, data: dict) -> str:
-    """Standard-SSE-Rahmen: 'event: <typ>\ndata: <eine JSON-Zeile>\n\n'."""
+    """Standard SSE frame: 'event: <type>\ndata: <one JSON line>\n\n'."""
     return f"event: {etype}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
-# Folgepaket "begrenzter Kontext fuer Folgeauftraege" (Zielarchitektur v1, bewusst
-# NICHT Teil von P5): bewusst KEIN Vollverlauf -- nur eine kurze Orientierung ueber
-# die letzten paar abgeschlossenen Turns, damit ein Folgeauftrag nicht komplett
-# kontextlos ist. Dauerhaftes Wissen bleibt weiterhin Aufgabe des Modells selbst
-# (memory_write), das hier NICHT ersetzt.
+# Follow-up package "limited context for follow-up tasks" (target architecture v1,
+# deliberately NOT part of P5): deliberately NO full history -- only a short
+# orientation about the last few completed turns, so that a follow-up task is not
+# completely context-free. Durable knowledge remains the job of the model itself
+# (memory_write), which this does NOT replace.
 CONTEXT_MAX_TURNS = 5
 CONTEXT_MAX_CHARS = 6000
 
 
 def _collect_context_turns(session: dict) -> list[tuple[str, str]]:
-    """Die letzten CONTEXT_MAX_TURNS ABGESCHLOSSENEN Turns dieser Session
-    (Nutzer-Nachricht, Stage-Zusammenfassung). Keine laufenden Stages (koennen
-    hier gar nicht vorkommen, da ein Start erst nach der 409-Pruefung erfolgt)."""
+    """The last CONTEXT_MAX_TURNS COMPLETED turns of this session (user message,
+    stage summary). No running stages (they cannot occur here at all, since a
+    start only happens after the 409 check)."""
     stages_by_id = {s["stage_id"]: s for s in session.get("stages", [])}
     turns: list[tuple[str, str]] = []
     for m in session.get("messages", []):
         stage = stages_by_id.get(m.get("stage_id"))
         if stage is None or stage.get("status") in (None, "running"):
             continue
-        summary = stage.get("summary") or f"(Status: {stage.get('status')}, keine Zusammenfassung)"
+        summary = stage.get("summary") or f"(Status: {stage.get('status')}, no summary)"
         turns.append((m.get("content", ""), summary))
     return turns[-CONTEXT_MAX_TURNS:]
 
 
 def _render_context_history(turns: list[tuple[str, str]]) -> str:
-    """Rendert die Turns als Orientierungstext, bei CONTEXT_MAX_CHARS gekappt.
-    Leerer String, wenn keine Turns vorliegen (erster Auftrag einer Session)."""
+    """Renders the turns as orientation text, capped at CONTEXT_MAX_CHARS.
+    Empty string if there are no turns (first task of a session)."""
     if not turns:
         return ""
-    lines = ["Bisheriger Verlauf dieser Session (kurze Orientierung, nicht zwingend "
-             "alles relevant fuer den aktuellen Auftrag):", ""]
+    lines = ["Previous history of this session (short orientation, not necessarily "
+             "all relevant to the current task):", ""]
     for user_msg, summary in turns:
-        lines.append(f"Nutzer (vorher): {user_msg}")
-        lines.append(f"Ergebnis: {summary}")
+        lines.append(f"User (earlier): {user_msg}")
+        lines.append(f"Result: {summary}")
         lines.append("")
     history_text = "\n".join(lines)
     if len(history_text) > CONTEXT_MAX_CHARS:
-        history_text = "[...gekuerzt...]\n" + history_text[-CONTEXT_MAX_CHARS:]
+        history_text = "[...truncated...]\n" + history_text[-CONTEXT_MAX_CHARS:]
     return history_text
 
 
 def _build_task_text(session: dict, message: str) -> str:
-    """Baut den Task-Text aus dem begrenzten Kontext (siehe _collect_context_turns/
-    _render_context_history) plus der aktuellen Nachricht. Wird NUR in den
-    Task-Slot geschrieben (was das Modell sieht) -- die persistierte
-    message_received-/session["messages"]-Historie bleibt die ORIGINALE, kurze
-    Nachricht, sonst wuerde sich der Kontext bei jedem Folge-Turn selbst-
-    rekursiv aufblaehen."""
+    """Builds the task text from the limited context (see _collect_context_turns/
+    _render_context_history) plus the current message. Written ONLY into the
+    task slot (what the model sees) -- the persisted message_received/
+    session["messages"] history stays the ORIGINAL, short message, otherwise the
+    context would inflate itself recursively with every follow-up turn."""
     history_text = _render_context_history(_collect_context_turns(session))
     if not history_text:
         return message
-    return f"{history_text}--- Aktueller Auftrag ---\n{message}"
+    return f"{history_text}--- Current task ---\n{message}"
 
 
 def _start_stage(session_id: str, body: MessageIn,
                   events: BoundedSseQueue) -> tuple[StageContext, dict]:
-    """P5-Startphase -- die bisherige _run_stage-Logik BIS VOR die Warte- und
-    Finalisierungsphase, 1:1 unveraendert: Task-Tempdatei, Kill-Job, Subprozess,
-    LiveStage-Registry, stage_record + JSONL-Events (message_received,
-    stage_started), Pipe-Drainer, Watchdog. Wird vom POST /messages-Handler
-    UNTER dem Session-Lock aufgerufen (404/409-Pruefung vorher). Liefert den
-    Kontext fuer die Finalisierungsphase plus das stage_started-Datenobjekt
-    (wird als erstes SSE-Event gepusht). `events`: der stderr-Drainer pusht
-    jede Log-Zeile sofort als 'log_line'-Event (Live-Sichtbarkeit, z. B. ob/
-    wann run_substage laeuft -- Nutzer-Anfrage nach einem unbemerkten Haenger)."""
+    """P5 start phase -- the former _run_stage logic UP TO the wait and
+    finalization phase, unchanged 1:1: task temp file, kill job, subprocess,
+    LiveStage registry, stage_record + JSONL events (message_received,
+    stage_started), pipe drainers, watchdog. Called by the POST /messages handler
+    UNDER the session lock (404/409 check beforehand). Returns the context for
+    the finalization phase plus the stage_started data object (pushed as the
+    first SSE event). `events`: the stderr drainer pushes every log line
+    immediately as a 'log_line' event (live visibility, e.g. whether/when
+    run_substage runs -- user request after an unnoticed hang)."""
     stage_id = str(uuid.uuid4())
     started_at = _utcnow()
     start_mono = time.monotonic()
     deadline = start_mono + STAGE_TIMEOUT_S
     session = _sessions[session_id]
 
-    # Task-Text als UTF-8-Tempdatei: --task @datei umgeht das Windows-argv-Limit (P3).
-    # Folgepaket "begrenzter Kontext": der Task-Slot bekommt nicht mehr NUR die
-    # aktuelle Nachricht, sondern zusaetzlich die letzten CONTEXT_MAX_TURNS
-    # abgeschlossenen Turns dieser Session als kurze Orientierung (_build_task_text).
+    # Task text as a UTF-8 temp file: --task @file bypasses the Windows argv limit (P3).
+    # Follow-up package "limited context": the task slot no longer gets ONLY the
+    # current message, but additionally the last CONTEXT_MAX_TURNS completed turns
+    # of this session as a short orientation (_build_task_text).
     fd, task_path = tempfile.mkstemp(prefix=f"{stage_id}-", suffix=".txt", dir=TASK_TMP_DIR)
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.write(_build_task_text(session, body.message))
 
-    # P4 + P1-Fix "atomare Job-Zuweisung": Job anlegen, Prozess SUSPENDIERT starten,
-    # zuweisen, ERST DANN fortsetzen. Vorher lag zwischen Popen() (Prozess laeuft
-    # bereits) und _assign_process_to_job() ein Zeitfenster, in dem der Stage-
-    # Runner theoretisch schon einen Kindprozess (z. B. pwsh ueber run_powershell)
-    # haette starten koennen, BEVOR das Job-Object aktiv war -- dieses Kind waere
-    # dann nicht vom KILL_ON_JOB_CLOSE-Schutz erfasst gewesen. Ein suspendiert
-    # gestarteter Prozess kann bauartbedingt ueberhaupt keinen Code ausfuehren,
-    # also auch keine Kindprozesse starten, bis wir ihn per _resume_all_threads
-    # ausdruecklich fortsetzen -- das Fenster ist damit strukturell geschlossen,
-    # nicht nur verkuerzt. CREATE_SUSPENDED + das spaetere Fortsetzen ueber
-    # Toolhelp32Snapshot/OpenThread statt eines Popen-eigenen Thread-Handles,
-    # weil Popen diesen Handle intern sofort schliesst (siehe Kommentar bei
-    # CREATE_SUSPENDED weiter oben) -- keine privaten CPython-Interna, nur der
-    # oeffentliche proc.pid plus dokumentierte Win32-APIs.
+    # P4 + P1 fix "atomic job assignment": create the job, start the process
+    # SUSPENDED, assign it, ONLY THEN resume it. Previously there was a time window
+    # between Popen() (process already running) and _assign_process_to_job() in
+    # which the stage runner could theoretically already have started a child
+    # process (e.g. pwsh via run_powershell) BEFORE the job object was active --
+    # that child would then not have been covered by the KILL_ON_JOB_CLOSE
+    # protection. A process started suspended by design cannot execute any code
+    # at all, and therefore cannot start child processes, until we explicitly
+    # resume it via _resume_all_threads -- the window is thus structurally closed,
+    # not just shortened. CREATE_SUSPENDED + the later resume via
+    # Toolhelp32Snapshot/OpenThread instead of a Popen-owned thread handle,
+    # because Popen closes that handle internally right away (see the comment at
+    # CREATE_SUSPENDED further up) -- no private CPython internals, only the
+    # public proc.pid plus documented Win32 APIs.
     job_handle: int | None = None
     proc: subprocess.Popen | None = None
     try:
@@ -1194,37 +1188,37 @@ def _start_stage(session_id: str, body: MessageIn,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             creationflags=CREATE_NO_WINDOW | CREATE_SUSPENDED,
-            # Umgebungsvererbung (praezisiert): os.environ WIRD VOLLSTAENDIG
-            # geerbt (nicht nur eine Teilmenge) -- der Stage-Runner braucht u. a.
-            # PATH (fuer pwsh/git/etc. in run_powershell) und die vom System-
-            # Python gesetzten Variablen; es gibt hier keine Secrets, die nicht
-            # auch die API selbst schon haette (Single-User-Lokalsystem, kein
-            # Multi-Tenant-Trennungsbedarf). PYTHONIOENCODING wird zusaetzlich
-            # ERZWUNGEN (ueberschreibt eine evtl. geerbte andere Codierung):
-            # ohne das schreibt Python auf einem Nicht-Konsolen-Stream unter
-            # Windows in der System-Codepage (hier 850, nicht UTF-8) -- main.py
-            # dekodiert stdout/stderr hart als UTF-8, also wurden Umlaute etc. zu
-            # "?" (gefunden: "Kl?rung" statt "Klaerung" im stderr_tail der GUI).
+            # Environment inheritance (clarified): os.environ IS inherited
+            # COMPLETELY (not just a subset) -- the stage runner needs among other
+            # things PATH (for pwsh/git/etc. in run_powershell) and the variables
+            # set by the system Python; there are no secrets here that the API
+            # itself would not already have (single-user local system, no
+            # multi-tenant separation needed). PYTHONIOENCODING is additionally
+            # ENFORCED (overrides any other inherited encoding): without it,
+            # Python on Windows writes to a non-console stream in the system code
+            # page (here 850, not UTF-8) -- main.py decodes stdout/stderr strictly
+            # as UTF-8, so umlauts etc. became "?" (found: "Kl?rung" instead of
+            # "Klaerung" in the GUI's stderr_tail).
             env={**os.environ, "PYTHONIOENCODING": "utf-8"},
         )
         _assign_process_to_job(job_handle, proc)
         resumed = _resume_all_threads(proc.pid)
         if resumed == 0:
-            # Kein Thread gefunden/fortsetzbar -- der Prozess bliebe fuer immer
-            # eingefroren (suspendiert, nie laufend). Als Startfehler behandeln,
-            # identische Bereinigung wie bei einem gescheiterten Assign.
-            raise OSError(f"ResumeThread: kein Thread von PID {proc.pid} konnte fortgesetzt werden")
+            # No thread found/resumable -- the process would stay frozen forever
+            # (suspended, never running). Treat as a start error, identical
+            # cleanup as for a failed assign.
+            raise OSError(f"ResumeThread: no thread of PID {proc.pid} could be resumed")
     except Exception as exc:
         if proc is not None:
             try:
-                proc.kill()  # wirkt auch auf einen nie fortgesetzten (suspendierten) Prozess
+                proc.kill()  # also works on a never-resumed (suspended) process
             except OSError:
                 pass
         if job_handle is not None:
-            _close_job_handle(job_handle)  # toetet verbliebene Baum-Mitglieder mit
+            _close_job_handle(job_handle)  # kills remaining tree members along with it
         _delete_quiet(task_path)
-        log.error("Stage-Start fehlgeschlagen: %s", exc)
-        raise HTTPException(status_code=500, detail="Stage-Subprozess konnte nicht gestartet werden")
+        log.error("Stage start failed: %s", exc)
+        raise HTTPException(status_code=500, detail="stage subprocess could not be started")
 
     live = LiveStage(stage_id, proc, job_handle)
     with _live_guard:
@@ -1240,17 +1234,17 @@ def _start_stage(session_id: str, body: MessageIn,
     err_chunks: list[bytes] = []
     drainers: list[threading.Thread] = []
     summary_capture = _SummaryCapture()
-    log.info("Stage %s gestartet (Session %s, pid=%d, model=%s)",
+    log.info("Stage %s started (session %s, pid=%d, model=%s)",
              stage_id, session_id, proc.pid, body.model)
     try:
         session["stages"].append(stage_record)
         msg_event = _new_event("message_received", {
             "role": "user", "content": body.message, "stage_id": stage_id})
         _append_event(session_id, msg_event)
-        # Im-Memory-Zustand des LAUFENDEN Servers muss dieselbe Nachricht sehen wie eine
-        # Rekonstruktion nach Neustart (_apply_event) -- sonst zeigt GET /sessions/{id}
-        # waehrend der Laufzeit leere "messages", obwohl die JSONL-Datei korrekt ist
-        # (Bug gefunden beim GUI-Test: Reload zeigte leeren Verlauf trotz korrekter Datei).
+        # The in-memory state of the RUNNING server must see the same message as a
+        # reconstruction after restart (_apply_event) -- otherwise GET /sessions/{id}
+        # shows empty "messages" at runtime even though the JSONL file is correct
+        # (bug found during the GUI test: reload showed an empty history despite a correct file).
         session["messages"].append({
             "role": "user", "content": body.message,
             "stage_id": stage_id, "ts": msg_event["ts"]})
@@ -1258,9 +1252,9 @@ def _start_stage(session_id: str, body: MessageIn,
             "stage_id": stage_id, "exit_code": None, "pid": proc.pid,
             "model": body.model, "project": body.project, "started_at": started_at}))
 
-        # SSE stage_started VOR den Drainern pushen -- garantiert, dass der Client
-        # dieses Event vor jeder moeglichen log_line-Zeile sieht (die Drainer
-        # koennten sonst sofort nach dem Start schon etwas lesen).
+        # Push SSE stage_started BEFORE the drainers -- guarantees that the client
+        # sees this event before any possible log_line (the drainers could
+        # otherwise read something right after the start).
         started_data = {
             "stage_id": stage_id, "status": "running", "exit_code": None,
             "pid": proc.pid, "model": body.model, "project": body.project,
@@ -1268,7 +1262,7 @@ def _start_stage(session_id: str, body: MessageIn,
         }
         events.put_priority(("stage_started", started_data))
 
-        # stdout/stderr DURCHGAENGIG leeren (voller Pipe-Puffer = Deadlock), Tails behalten.
+        # Drain stdout/stderr CONTINUOUSLY (full pipe buffer = deadlock), keep tails.
         drainers = [
             threading.Thread(target=_drain_capped, args=(proc.stdout, out_chunks, TAIL_LIMIT), daemon=True),
             threading.Thread(target=_drain_capped,
@@ -1278,16 +1272,16 @@ def _start_stage(session_id: str, body: MessageIn,
         for t in drainers:
             t.start()
 
-        # P4: Watchdog-Thread -- toetet nach STAGE_TIMEOUT_S aktiv den Job.
+        # P4: watchdog thread -- actively kills the job after STAGE_TIMEOUT_S.
         watchdog = threading.Thread(
             target=_watchdog_thread, args=(session_id, live, start_mono), daemon=True)
         watchdog.start()
     except Exception:
-        # Startphase unvollstaendig (extrem unwahrscheinlich): Gleiche Aufraeum- und
-        # Persistenzregeln wie die Fehlerklappe der Finalisierungsphase (Race-Fix
-        # P1: _kill_intent-basierte Entscheidung statt nur abort_event, Handle-
-        # Schliessen unter demselben Lock wie ein moeglicher Kill-Versuch).
-        log.exception("Startphase der Stage %s (Session %s) fehlgeschlagen",
+        # Start phase incomplete (extremely unlikely): same cleanup and persistence
+        # rules as the error path of the finalization phase (race fix P1:
+        # _kill_intent-based decision instead of only abort_event, handle closing
+        # under the same lock as a possible kill attempt).
+        log.exception("Start phase of stage %s (session %s) failed",
                       stage_id, session_id)
         with _live_guard:
             existing = _kill_intent.get(session_id)
@@ -1299,7 +1293,7 @@ def _start_stage(session_id: str, body: MessageIn,
         stage_record.update({
             "status": fail_status, "exit_code": None, "finished_at": _utcnow(),
             "duration_s": round(time.monotonic() - start_mono, 1),
-            "summary": "(API-Fehler waehrend der Startphase)",
+            "summary": "(API error during the start phase)",
             "stdout_tail": "", "stderr_tail": "",
         })
         try:
@@ -1310,7 +1304,7 @@ def _start_stage(session_id: str, body: MessageIn,
                 "summary": stage_record["summary"],
                 "stdout_tail": "", "stderr_tail": ""}))
         except Exception:
-            log.exception("stage_completed nach Startfehler nicht persistierbar (Session %s)",
+            log.exception("stage_completed after start error could not be persisted (session %s)",
                           session_id)
         _delete_quiet(task_path)
         live.done_event.set()
@@ -1326,12 +1320,12 @@ def _start_stage(session_id: str, body: MessageIn,
 
 
 def _finalize_stage(ctx: StageContext) -> dict:
-    """P5-Finalisierungsphase -- die bisherige _run_stage-Logik AB der Warte- und
-    Finalisierungsphase, 1:1 unveraendert (Exit-Codes 0-3 sind die einzige
-    Statusquelle; Rule A fuer Abbruch; Persistenz des stage_completed-Events;
-    Registry-Aufräumung; Job-Handle-Schliessen; done_event). Laeuft im eigenen
-    Worker-Thread OHNE Session-Lock. Liefert das volle Stage-Objekt (wird als
-    Terminal-SSE-Event an den Client gepusht)."""
+    """P5 finalization phase -- the former _run_stage logic FROM the wait and
+    finalization phase on, unchanged 1:1 (exit codes 0-3 are the only status
+    source; rule A for aborts; persisting the stage_completed event; registry
+    cleanup; closing the job handle; done_event). Runs in its own worker thread
+    WITHOUT the session lock. Returns the full stage object (pushed to the client
+    as the terminal SSE event)."""
     session_id = ctx.session_id
     stage_id = ctx.stage_id
     proc = ctx.proc
@@ -1349,21 +1343,21 @@ def _finalize_stage(ctx: StageContext) -> dict:
     try:
         rc = _wait_proc(proc, session_id, deadline)
 
-        # LINEARISIERUNGSPUNKT (Punkt C): rc ist jetzt bekannt -- der Prozess hat
-        # sich beendet, so oder so. Die Frage "hat vorher schon jemand einen
-        # Abbruch registriert" wird HIER, unter _live_guard, EIN EINZIGES MAL
-        # verbindlich entschieden -- derselbe Lock, den auch _terminate_live_stage
-        # fuer seine Pruefung/Registrierung verwendet, macht die beiden Seiten
-        # gegenseitig exklusiv: wer zuerst den Lock bekommt, gewinnt.
-        # - _kill_intent noch leer (None): WIR sind zuerst da -- natuerliches
-        #   Ende gewinnt verbindlich, mit _NATURAL markieren, damit ein jetzt
-        #   noch eintreffender Abort zu spaet ist und nichts mehr aendert.
-        # - _kill_intent traegt schon einen Abbruchgrund: der wurde VOR diesem
-        #   Punkt registriert -- Rule A, Abbruch gewinnt (status uebernehmen).
-        # _kill_intent wird hier bewusst NOCH NICHT entfernt (siehe unten) --
-        # sonst koennte ein Abort, der genau in diesem Moment durchkommt, faelsch-
-        # lich glauben, er sei der erste, weil der Registry-Eintrag (_live_stages)
-        # erst spaeter (nach der Persistenz) entfernt wird.
+        # LINEARIZATION POINT (point C): rc is now known -- the process has ended,
+        # one way or another. The question "has someone already registered an
+        # abort before" is decided bindingly HERE, under _live_guard, ONCE AND
+        # ONLY ONCE -- the same lock that _terminate_live_stage uses for its
+        # check/registration makes both sides mutually exclusive: whoever gets
+        # the lock first wins.
+        # - _kill_intent still empty (None): WE are first -- the natural end wins
+        #   bindingly, mark with _NATURAL so that an abort still arriving now is
+        #   too late and changes nothing.
+        # - _kill_intent already holds an abort reason: it was registered BEFORE
+        #   this point -- rule A, the abort wins (take over the status).
+        # _kill_intent is deliberately NOT removed here yet (see below) --
+        # otherwise an abort coming through at exactly this moment could wrongly
+        # believe it is first, because the registry entry (_live_stages) is only
+        # removed later (after persistence).
         with _live_guard:
             existing = _kill_intent.get(session_id)
             if existing is None:
@@ -1371,7 +1365,7 @@ def _finalize_stage(ctx: StageContext) -> dict:
                 aborted = False
                 status = None
             else:
-                aborted = existing != _NATURAL  # _NATURAL kann hier nie vorkommen, defensiv
+                aborted = existing != _NATURAL  # _NATURAL can never occur here, defensive
                 status = existing if aborted else None
 
         for t in drainers:
@@ -1384,13 +1378,13 @@ def _finalize_stage(ctx: StageContext) -> dict:
         duration_s = round(time.monotonic() - start_mono, 1)
 
         if aborted:
-            # Rule A: Abbruch-Wunsch gewinnt; exit_code bleibt null (kein Runner-Urteil).
+            # Rule A: the abort request wins; exit_code stays null (no runner verdict).
             status = status or STATUS_ABORTED
             exit_code = None
             summary = {
-                STATUS_ABORTED: "Stage vom Nutzer abgebrochen (POST /abort), kein Runner-Urteil.",
-                STATUS_WATCHDOG: f"API-Watchdog beendet die Stage nach {STAGE_TIMEOUT_S // 60} min, kein Runner-Urteil.",
-            }.get(status, "Stage aktiv beendet, kein Runner-Urteil.")
+                STATUS_ABORTED: "Stage aborted by the user (POST /abort), no runner verdict.",
+                STATUS_WATCHDOG: f"API watchdog terminated the stage after {STAGE_TIMEOUT_S // 60} min, no runner verdict.",
+            }.get(status, "Stage actively terminated, no runner verdict.")
         else:
             exit_code = rc
             status = EXIT_OUTCOMES.get(rc, f"unknown_rc_{rc}")
@@ -1408,19 +1402,19 @@ def _finalize_stage(ctx: StageContext) -> dict:
         }))
 
         with _live_guard:
-            # Race-Fix (P1, Punkt A): Handle-Schliessen laeuft jetzt unter
-            # DEMSELBEN Lock wie jeder moegliche Kill-Versuch (_kill_job_locked)
-            # -- job_closed-Flag macht ein spaeteres TerminateJobObject auf
-            # diesem Handle unmoeglich, egal welcher Thread als naechstes dran ist.
+            # Race fix (P1, point A): closing the handle now runs under THE SAME
+            # lock as any possible kill attempt (_kill_job_locked) -- the
+            # job_closed flag makes a later TerminateJobObject on this handle
+            # impossible, no matter which thread comes next.
             _close_job_handle_locked(live)
             _live_stages.pop(session_id, None)
-            _kill_intent.pop(session_id, None)  # jetzt erst: _NATURAL oder Abbruchgrund entfernen
+            _kill_intent.pop(session_id, None)  # only now: remove _NATURAL or the abort reason
         live.done_event.set()
-        log.info("Stage %s fertig: status=%s rc=%s nach %.1f s",
+        log.info("Stage %s finished: status=%s rc=%s after %.1f s",
                  stage_id, status, exit_code, duration_s)
         return {"session_id": session_id, "stage": stage_record}
     except Exception:
-        log.exception("Finalisierung der Stage %s (Session %s) fehlgeschlagen",
+        log.exception("Finalization of stage %s (session %s) failed",
                       stage_id, session_id)
         with _live_guard:
             existing = _kill_intent.get(session_id)
@@ -1437,7 +1431,7 @@ def _finalize_stage(ctx: StageContext) -> dict:
         stage_record.update({
             "status": fail_status, "exit_code": None, "finished_at": _utcnow(),
             "duration_s": round(time.monotonic() - start_mono, 1),
-            "summary": "(API-Fehler waehrend der Finalisierung)",
+            "summary": "(API error during finalization)",
             "stdout_tail": fail_out, "stderr_tail": fail_err,
         })
         try:
@@ -1448,51 +1442,50 @@ def _finalize_stage(ctx: StageContext) -> dict:
                 "summary": stage_record["summary"],
                 "stdout_tail": fail_out, "stderr_tail": fail_err}))
         except Exception:
-            log.exception("stage_completed nach Fehler nicht persistierbar (Session %s)", session_id)
+            log.exception("stage_completed after error could not be persisted (session %s)", session_id)
         _delete_quiet(task_path)
         live.done_event.set()
         raise
 
 
 def _stage_worker(ctx: StageContext, events: BoundedSseQueue) -> None:
-    """P5-Worker-Thread (einer pro POST /messages): finalisiert die in der
-    Startphase gestartete Stage und liefert das Ergebnis als Queue-Items an den
-    SSE-Generator -- genau EIN Terminal-Event, danach der Sentinel. Laeuft OHNE
-    Session-Lock; eine Client-Trennung aendert nichts am Runner-Lauf (die Stage
-    laeuft weiter, Finalisierung/Persistenz unveraendert -- Abbruch bleibt
-    POST /abort). Terminal-Event und Sentinel sind Prioritaets-Puts (BoundedSseQueue)
-    -- kommen garantiert an, auch wenn die Queue zwischenzeitlich voller log_line-
-    Events war (die werden dafuer notfalls verdraengt)."""
+    """P5 worker thread (one per POST /messages): finalizes the stage started in
+    the start phase and delivers the result as queue items to the SSE generator
+    -- exactly ONE terminal event, then the sentinel. Runs WITHOUT the session
+    lock; a client disconnect does not affect the runner (the stage keeps
+    running, finalization/persistence unchanged -- aborting is still
+    POST /abort). Terminal event and sentinel are priority puts (BoundedSseQueue)
+    -- they are guaranteed to arrive, even if the queue was temporarily full of
+    log_line events (those are evicted if necessary)."""
     try:
         result = _finalize_stage(ctx)
     except Exception:
-        # _finalize_stage hat Registry/Job/done_event bereits aufgeraeumt und das
-        # stage_completed-Event persistiert; das Stage-Objekt im Session-Zustand
-        # spiegelt den Endzustand -- als Terminal-Event liefern.
-        log.exception("Stage-Worker: unvorhergesehener Fehler bei Stage %s", ctx.stage_id)
+        # _finalize_stage has already cleaned up registry/job/done_event and
+        # persisted the stage_completed event; the stage object in the session
+        # state reflects the final state -- deliver it as the terminal event.
+        log.exception("Stage worker: unexpected error in stage %s", ctx.stage_id)
         result = {
             "session_id": ctx.session_id,
             "stage": next((s for s in _sessions[ctx.session_id]["stages"]
                            if s.get("stage_id") == ctx.stage_id), None) or {},
         }
-    # Verworfene log_line-Events (Ueberlast) VOR dem Terminal-Event melden -- ein
-    # kompaktes Sammel-Event statt einer Warnung pro Zeile; rein informativ ueber
-    # verlorene LIVE-Sicht, niemals ueber das (immer vollstaendige) Stage-Ergebnis.
+    # Report dropped log_line events (overload) BEFORE the terminal event -- one
+    # compact summary event instead of a warning per line; purely informative about
+    # lost LIVE visibility, never about the (always complete) stage result.
     dropped = events.pop_dropped()
     if dropped:
         events.put_priority(("log_dropped", {"count": dropped}))
     events.put_priority(("stage_completed", result["stage"]))
-    events.put_priority(None)  # Sentinel: Stream-Ende
+    events.put_priority(None)  # sentinel: end of stream
 
 
 async def _sse_stream(events: BoundedSseQueue, started_mono: float) -> AsyncIterator[str]:
-    """P5-Consumer-Seite des SSE-Streams: gibt die gepushten Events im
-    Standard-SSE-Format aus (event/data/Rahmenende) und sendet, solange KEIN
-    Event kommt (Stage laeuft), alle HEARTBEAT_INTERVAL_S ein heartbeat-Event.
-    Beendet sich mit dem Sentinel, der nach genau EINEM Terminal-Event gesetzt
-    wird. Client-Trennung waehrend der Stage aendert nichts am Runner-Lauf
-    (bewusst: Abbruch bleibt POST /abort); der Generator wird dann einfach nicht
-    mehr weiter konsumiert."""
+    """P5 consumer side of the SSE stream: emits the pushed events in standard SSE
+    format (event/data/frame end) and, as long as NO event arrives (stage is
+    running), sends a heartbeat event every HEARTBEAT_INTERVAL_S. Ends with the
+    sentinel, which is set after exactly ONE terminal event. A client disconnect
+    during the stage does not affect the runner (deliberately: aborting is still
+    POST /abort); the generator is then simply no longer consumed."""
     while True:
         try:
             item = await asyncio.to_thread(events.get, timeout=HEARTBEAT_INTERVAL_S)
@@ -1500,7 +1493,7 @@ async def _sse_stream(events: BoundedSseQueue, started_mono: float) -> AsyncIter
             yield _sse_frame("heartbeat", {
                 "elapsed_s": round(time.monotonic() - started_mono, 1)})
             continue
-        if item is None:  # Sentinel nach dem Terminal-Event
+        if item is None:  # sentinel after the terminal event
             break
         etype, data = item
         yield _sse_frame(etype, data)
@@ -1508,18 +1501,18 @@ async def _sse_stream(events: BoundedSseQueue, started_mono: float) -> AsyncIter
 
 @app.post("/sessions/{session_id}/messages")
 def post_message(session_id: str, body: MessageIn) -> StreamingResponse:
-    """Fuehrt die Stage fuer den Nutzer-Task aus und liefert den Fortschritt als
-    SSE-Stream (P5): Content-Type text/event-stream, sofort ein stage_started-
-    Event, alle 5 s ein heartbeat-Event, am Ende genau EIN Terminal-Event
-    stage_completed mit dem vollen Stage-Objekt (status/exit_code/finished_at/
-    duration_s/summary/stdout_tail/stderr_tail). Kein Token-Streaming, keine
-    Tool-Events (bewusst vertagt, Zielarchitektur v1).
+    """Runs the stage for the user's task and delivers the progress as an SSE
+    stream (P5): content type text/event-stream, a stage_started event
+    immediately, a heartbeat event every 5 s, and at the end exactly ONE terminal
+    event stage_completed with the full stage object (status/exit_code/
+    finished_at/duration_s/summary/stdout_tail/stderr_tail). No token streaming,
+    no tool events (deliberately deferred, target architecture v1).
 
-    Die 404/409-Pruefung bleibt VOR dem Stream-Start (Fast Path + Recheck unter
-    Session-Lock, unveraendert); auch die Startphase laeuft unter dem Lock
-    synchron, sodass ein konkurrierender POST niemals zwei Stages derselben
-    Session starten kann. Danach wartet/finalisiert ein Worker-Thread; die
-    Antwort wird sofort als StreamingResponse zurueckgegeben."""
+    The 404/409 check stays BEFORE the stream starts (fast path + recheck under
+    the session lock, unchanged); the start phase also runs synchronously under
+    the lock, so a competing POST can never start two stages of the same
+    session. Afterwards a worker thread waits/finalizes; the response is returned
+    immediately as a StreamingResponse."""
     lock = _session_lock(session_id)
     session = _sessions.get(session_id)
     if session is not None and _running_stage(session) is not None:
@@ -1531,8 +1524,8 @@ def post_message(session_id: str, body: MessageIn) -> StreamingResponse:
         if _running_stage(_sessions[session_id]) is not None:
             raise HTTPException(status_code=409, detail="stage already running for this session")
         ctx, _started_data = _start_stage(session_id, body, events)
-    # stage_started wird bereits INNERHALB _start_stage gepusht (vor den
-    # Drainer-Threads, siehe dort) -- garantiert Reihenfolge vor jeder log_line.
+    # stage_started is already pushed INSIDE _start_stage (before the drainer
+    # threads, see there) -- guarantees ordering before any log_line.
     worker = threading.Thread(target=_stage_worker, args=(ctx, events), daemon=True)
     worker.start()
     return StreamingResponse(
@@ -1549,12 +1542,13 @@ def post_message(session_id: str, body: MessageIn) -> StreamingResponse:
 
 @app.post("/sessions/{session_id}/abort")
 def abort_session(session_id: str) -> dict:
-    """Bricht die laufende Stage kontrolliert ab (P4): kill-intent + abort_event
-    setzen, Job-Object toeten (ganzer Prozessbaum), auf die Worker-Finalisierung
-    warten (done_event, max. ABORT_FINALIZE_TIMEOUT_S). Unbekannte Session -> 404;
-    bekannte Session OHNE laufende Stage -> 409 (Begrundung: Session-Existenz ist
-    die Pruefung mit eigener 404; 'keine aktive Stage' ist ein Zustandskonflikt
-    des Requests, kein fehlendes Resource -- wie der 409 beim doppelten POST)."""
+    """Aborts the running stage in a controlled way (P4): set kill intent +
+    abort_event, kill the job object (whole process tree), wait for the worker's
+    finalization (done_event, max. ABORT_FINALIZE_TIMEOUT_S). Unknown session ->
+    404; known session WITHOUT a running stage -> 409 (rationale: session
+    existence is the check with its own 404; 'no active stage' is a state
+    conflict of the request, not a missing resource -- like the 409 for a
+    duplicate POST)."""
     session = _sessions.get(session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="unknown session_id")
@@ -1562,6 +1556,6 @@ def abort_session(session_id: str) -> dict:
     if live is None:
         raise HTTPException(status_code=409, detail="no running stage for this session")
     if not live.done_event.wait(timeout=ABORT_FINALIZE_TIMEOUT_S):
-        raise HTTPException(status_code=500, detail="Stage finalisiert nicht nach dem Kill")
+        raise HTTPException(status_code=500, detail="stage was not finalized after the kill")
     stage = next((s for s in session["stages"] if s.get("stage_id") == live.stage_id), None)
     return {"session_id": session_id, "stage": stage}

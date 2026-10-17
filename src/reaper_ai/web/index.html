@@ -3,7 +3,7 @@
 Copyright (C) 2026 Robert Backhaus
 SPDX-License-Identifier: GPL-3.0-or-later
 -->
-<html lang="de">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -108,7 +108,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
   .badge.error, .badge.wall_clock, .badge.max_iterations { color: var(--error); border-color: var(--error); }
   .badge.aborted, .badge.watchdog_timeout, .badge.incomplete { color: var(--warn); border-color: var(--warn); }
   .badge.running { color: var(--accent); border-color: var(--accent); }
-  /* Markdown-Darstellung der Stage-Antworten */
+  /* Markdown rendering of the stage answers */
   .msg .body.md { white-space: normal; display: block; overflow-wrap: anywhere; }
   .md > :first-child { margin-top: 0; }
   .md > :last-child { margin-bottom: 0; }
@@ -203,15 +203,15 @@ SPDX-License-Identifier: GPL-3.0-or-later
     <span class="hitem"><span class="dot checking" id="dot-runner"></span>Runner</span>
   </div>
   <div class="spacer"></div>
-  <label class="opt">Modell
+  <label class="opt">Model
     <select id="model">
-      <option value="qwen3.8-q5:latest">qwen3.8-q5:latest (Haupt)</option>
-      <option value="qwen3:8b">qwen3:8b (schnell)</option>
+      <option value="qwen3.8-q5:latest">qwen3.8-q5:latest (main)</option>
+      <option value="qwen3:8b">qwen3:8b (fast)</option>
     </select>
   </label>
-  <label class="opt">Projekt <input type="text" id="project" value="coding-v2" size="10"></label>
+  <label class="opt">Project <input type="text" id="project" value="coding-v2" size="10"></label>
   <label class="opt"><input type="checkbox" id="think"> Reasoning</label>
-  <button id="new-session">Neue Session</button>
+  <button id="new-session">New session</button>
   <button id="toggle-panel">Panel</button>
 </header>
 
@@ -221,25 +221,25 @@ SPDX-License-Identifier: GPL-3.0-or-later
     <div id="status-line"></div>
 
     <div id="composer">
-      <textarea id="input" placeholder="Nachricht an Reaper ..." rows="1"></textarea>
-      <button id="abort" class="danger" style="display:none">Abbrechen</button>
-      <button id="send" class="primary">Senden</button>
+      <textarea id="input" placeholder="Message to Reaper ..." rows="1"></textarea>
+      <button id="abort" class="danger" style="display:none">Abort</button>
+      <button id="send" class="primary">Send</button>
     </div>
   </div>
 
   <div id="side-panel" class="hidden">
     <div class="panel-section" id="panel-live">
-      <h2>Aktivität</h2>
-      <div class="meta-line" id="live-meta">Keine Stage aktiv.</div>
+      <h2>Activity</h2>
+      <div class="meta-line" id="live-meta">No stage active.</div>
       <pre id="live-log"></pre>
     </div>
     <div class="panel-section" id="panel-substages">
-      <h2>Hintergrundaufgaben</h2>
-      <div class="meta-line" id="substages-meta">Keine Sub-Stages in dieser Stage.</div>
+      <h2>Background tasks</h2>
+      <div class="meta-line" id="substages-meta">No sub-stages in this stage.</div>
       <ul id="substages-list"></ul>
     </div>
     <div class="panel-section" id="panel-context">
-      <h2>Kontext</h2>
+      <h2>Context</h2>
       <div class="meta-line" id="context-meta">-</div>
       <pre id="context-preview"></pre>
     </div>
@@ -252,20 +252,20 @@ SPDX-License-Identifier: GPL-3.0-or-later
 <script src="/vendor/hljs-powershell.min.js"></script>
 <script id="md-render">
 // ---------------------------------------------------------------------------
-// Markdown-Rendering der Stage-Antworten: marked (GFM) -> highlight.js fuer
-// Codebloecke -> DOMPurify. Ergebnis wird pro Quelltext gecacht, damit
-// renderHistory() (Recovery-Abgleich, Reload) nichts erneut parst/highlightet.
-// Fehlen die Bibliotheken, faellt die Anzeige auf reinen Text zurueck.
+// Markdown rendering of the stage answers: marked (GFM) -> highlight.js for
+// code blocks -> DOMPurify. The result is cached per source text, so that
+// renderHistory() (recovery sync, reload) does not parse/highlight again.
+// If the libraries are missing, the display falls back to plain text.
 // ---------------------------------------------------------------------------
 const MD_CACHE_MAX = 300;
 const mdCache = new Map();
-const mdStats = { renders: 0 };  // Anzahl tatsaechlicher Parse-Vorgaenge (Tests)
-// Auto-Erkennung fuer Codebloecke ohne Sprachangabe; bewusst ohne css/ini/markdown,
-// die bei kurzen Python-/Shell-Schnipseln sonst haeufig faelschlich gewinnen.
+const mdStats = { renders: 0 };  // number of actual parse runs (tests)
+// Auto-detection for code blocks without a language tag; deliberately without
+// css/ini/markdown, which otherwise often win wrongly for short Python/shell snippets.
 const MD_AUTO_LANGS = ['python', 'powershell', 'bash', 'json', 'yaml', 'javascript', 'typescript',
   'xml', 'sql', 'csharp', 'java', 'go', 'rust', 'cpp', 'diff'];
-// Nur Klassen, die das Rendering selbst erzeugt -- Klassen aus Modell-HTML
-// koennten sonst GUI-Selektoren (.msg.stage, .meta, .body ...) imitieren.
+// Only classes the rendering itself produces -- classes from model HTML could
+// otherwise imitate GUI selectors (.msg.stage, .meta, .body ...).
 const MD_CLASS_OK = /^(hljs(-[\w-]+)?|language-[\w+#-]+|[a-z]+_+)$/;
 const mdReady = !!(window.marked && window.DOMPurify && window.hljs);
 
@@ -295,14 +295,14 @@ if (mdReady) {
         const cls = name && /^[\w+#-]+$/.test(name) ? ` language-${name}` : '';
         return `<pre><code class="hljs${cls}">${html}</code></pre>\n`;
       },
-      // Rohes HTML aus der Modellantwort nur als Text zeigen (Platzhalter wie
-      // <datei> bleiben sichtbar); DOMPurify bleibt als zweite Sicherung.
+      // Show raw HTML from the model answer only as text (placeholders like
+      // <file> stay visible); DOMPurify remains as a second safeguard.
       html({ text }) {
         return mdEscape(text);
       },
-      // Keine externen Bilder nachladen -- als Link darstellen.
+      // Do not load external images -- render them as a link.
       image({ href, title, text }) {
-        return `<a href="${mdEscape(href || '')}">${mdEscape(text || title || href || 'Bild')}</a>`;
+        return `<a href="${mdEscape(href || '')}">${mdEscape(text || title || href || 'Image')}</a>`;
       },
     },
   });
@@ -319,7 +319,7 @@ if (mdReady) {
       node.setAttribute('target', '_blank');
       node.setAttribute('rel', 'noopener noreferrer');
     }
-    // Nur deaktivierte GFM-Task-Checkboxen zulassen.
+    // Only allow disabled GFM task checkboxes.
     if (node.tagName === 'INPUT' && !(node.getAttribute('type') === 'checkbox' && node.hasAttribute('disabled'))) {
       node.remove();
     }
@@ -333,14 +333,14 @@ const MD_PURIFY_CFG = {
   ALLOW_DATA_ATTR: false,
 };
 
-// Liefert fertiges, bereinigtes HTML (inkl. Code-Kopf mit Kopieren-Button)
-// oder null, wenn die Bibliotheken fehlen.
+// Returns finished, sanitized HTML (incl. code header with copy button)
+// or null if the libraries are missing.
 function renderMarkdown(src) {
   if (!mdReady) return null;
   if (mdCache.has(src)) {
     const hit = mdCache.get(src);
     mdCache.delete(src);
-    mdCache.set(src, hit);  // LRU: zuletzt benutzt nach hinten
+    mdCache.set(src, hit);  // LRU: most recently used to the back
     return hit;
   }
   mdStats.renders += 1;
@@ -365,7 +365,7 @@ function renderMarkdown(src) {
     btn.type = 'button';
     btn.className = 'copy-btn';
     btn.dataset.copy = 'code';
-    btn.textContent = 'Kopieren';
+    btn.textContent = 'Copy';
     head.append(label, btn);
     pre.replaceWith(wrap);
     wrap.append(head, pre);
@@ -376,8 +376,7 @@ function renderMarkdown(src) {
   return out;
 }
 
-// Setzt den Antworttext eines .body-Elements; unveraenderter Text wird nicht
-// erneut gesetzt.
+// Sets the answer text of a .body element; unchanged text is not set again.
 function setMarkdownBody(body, src) {
   if (body._mdSrc === src) return;
   const html = renderMarkdown(src);
@@ -397,7 +396,7 @@ async function copyText(text) {
       await navigator.clipboard.writeText(text);
       return true;
     }
-  } catch (e) { /* Fallback unten */ }
+  } catch (e) { /* fallback below */ }
   const ta = document.createElement('textarea');
   ta.value = text;
   ta.setAttribute('readonly', '');
@@ -458,7 +457,7 @@ function savePrefs() {
 
 function applyPanelState(open) {
   sidePanel.classList.toggle('hidden', !open);
-  togglePanelBtn.textContent = open ? 'Panel ausblenden' : 'Panel';
+  togglePanelBtn.textContent = open ? 'Hide panel' : 'Panel';
 }
 togglePanelBtn.addEventListener('click', () => {
   const open = sidePanel.classList.contains('hidden');
@@ -473,14 +472,14 @@ async function refreshContextPreview() {
     const r = await fetch(`${API}/sessions/${sessionId}/context`, { cache: 'no-store' });
     if (!r.ok) throw new Error('context http ' + r.status);
     const data = await r.json();
-    contextMetaEl.textContent = `${data.turns_included} von max. ${data.max_turns} Turns`;
+    contextMetaEl.textContent = `${data.turns_included} of max. ${data.max_turns} turns`;
     contextPreviewEl.textContent = data.preview || '';
     contextPreviewEl.style.display = data.preview ? '' : 'none';
     if (!data.preview) {
-      contextMetaEl.textContent += ' -- noch kein Verlauf (erste Nachricht dieser Session).';
+      contextMetaEl.textContent += ' -- no history yet (first message of this session).';
     }
   } catch (e) {
-    contextMetaEl.textContent = 'Kontext nicht ladbar: ' + e;
+    contextMetaEl.textContent = 'Context could not be loaded: ' + e;
     contextPreviewEl.textContent = '';
   }
 }
@@ -503,7 +502,7 @@ function addStageMessage(stageId) {
   const div = document.createElement('div');
   div.className = 'msg stage';
   if (stageId) div.dataset.stageId = stageId;
-  div.innerHTML = '<span class="body">...</span><div class="meta"><span class="badge running">läuft</span></div>';
+  div.innerHTML = '<span class="body">...</span><div class="meta"><span class="badge running">running</span></div>';
   logEl.appendChild(div);
   logEl.scrollTop = logEl.scrollHeight;
   return div;
@@ -515,8 +514,8 @@ function findStageDiv(stageId) {
     .find(d => d.dataset.stageId === stageId) || null;
 }
 
-// Idempotent: mehrfacher Aufruf (SSE + Abort-Antwort + Recovery-Poll) fuer
-// dieselbe Stage erzeugt keine doppelten Details-Bloecke.
+// Idempotent: repeated calls (SSE + abort response + recovery poll) for the
+// same stage do not create duplicate details blocks.
 function updateStageMessage(div, stage) {
   const body = div.querySelector('.body');
   const meta = div.querySelector('.meta');
@@ -525,14 +524,14 @@ function updateStageMessage(div, stage) {
     body.classList.remove('md');
     body._mdSrc = undefined;
     body.textContent = '...';
-    meta.innerHTML = '<span class="badge running">läuft</span>';
+    meta.innerHTML = '<span class="badge running">running</span>';
     return;
   }
-  setMarkdownBody(body, stage.summary || '(keine Zusammenfassung)');
+  setMarkdownBody(body, stage.summary || '(no summary)');
   const badge = `<span class="badge ${stage.status}">${stage.status}</span>`;
   const dur = stage.duration_s != null ? `<span>${stage.duration_s}s</span>` : '';
   meta.innerHTML = badge + dur
-    + (stage.summary ? '<button type="button" class="copy-btn" data-copy="answer">Antwort kopieren</button>' : '');
+    + (stage.summary ? '<button type="button" class="copy-btn" data-copy="answer">Copy answer</button>' : '');
   if (stage.stderr_tail) {
     const details = document.createElement('details');
     details.className = 'raw';
@@ -542,8 +541,8 @@ function updateStageMessage(div, stage) {
   }
 }
 
-// Kopieren-Buttons (Antwort + Codebloecke) per Event-Delegation: ueberlebt
-// den kompletten Neuaufbau des Verlaufs durch renderHistory().
+// Copy buttons (answer + code blocks) via event delegation: survives the
+// complete rebuild of the history by renderHistory().
 logEl.addEventListener('click', async (e) => {
   const btn = e.target.closest('button.copy-btn');
   if (!btn || !logEl.contains(btn)) return;
@@ -557,7 +556,7 @@ logEl.addEventListener('click', async (e) => {
   }
   const label = btn.dataset.label || (btn.dataset.label = btn.textContent);
   const ok = text ? await copyText(text) : false;
-  btn.textContent = ok ? 'Kopiert' : 'Kopieren fehlgeschlagen';
+  btn.textContent = ok ? 'Copied' : 'Copy failed';
   setTimeout(() => { btn.textContent = label; }, 1500);
 });
 
@@ -572,11 +571,11 @@ async function ensureSession() {
         renderHistory(data);
         sessionIdEl.textContent = sessionId;
         refreshContextPreview();
-        // Nach Reload: laeuft serverseitig noch eine Stage, GUI in den
-        // Laufzustand versetzen und das Ergebnis per Session-API nachladen
-        // (der alte SSE-Stream ist weg; es wird NIE erneut gesendet).
+        // After a reload: if a stage is still running on the server, put the GUI
+        // into the running state and fetch the result via the session API
+        // (the old SSE stream is gone; nothing is EVER sent again).
         if ((data.stages || []).some(s => s.status === 'running')) {
-          startRecovery('Stage läuft noch (nach Neuladen) – Ergebnis wird nachgeladen ...');
+          startRecovery('Stage still running (after reload) – fetching the result ...');
         }
         return;
       }
@@ -596,9 +595,9 @@ async function createSession() {
   refreshContextPreview();
 }
 
-// Server-Zustand ist die einzige Wahrheit: der Verlauf wird komplett aus
-// GET /sessions/{id} neu aufgebaut (nie angehaengt) -- dadurch keine doppelten
-// Nachrichten/Stage-Anzeigen, egal wie oft synchronisiert wird.
+// Server state is the only truth: the history is completely rebuilt from
+// GET /sessions/{id} (never appended) -- so no duplicate messages/stage
+// displays, no matter how often it is synchronized.
 function renderHistory(session) {
   logEl.innerHTML = '';
   const stagesById = {};
@@ -638,19 +637,19 @@ async function fetchSession(sid) {
 }
 
 // ---------------------------------------------------------------------------
-// Recovery: SSE-Stream verloren (Reload, Netzabbruch, Server-Neustart) ->
-// Stage-Status per GET /sessions/{id} pollen, bis keine Stage mehr 'running'
-// ist. Nur lesend: es wird NIE erneut POST /messages gesendet. Live-Logs der
-// Zwischenzeit sind verloren (akzeptiert), das finale Ergebnis kommt aus der
-// Session (auch aborted/watchdog_timeout/incomplete).
+// Recovery: SSE stream lost (reload, network drop, server restart) ->
+// poll the stage status via GET /sessions/{id} until no stage is 'running'
+// anymore. Read-only: POST /messages is NEVER sent again. Live logs from the
+// meantime are lost (accepted); the final result comes from the session
+// (including aborted/watchdog_timeout/incomplete).
 // ---------------------------------------------------------------------------
 const RECOVERY_POLL_MS = 2000;
 let recovering = false;
 let lastRenderSig = null;
 let sseActive = false;
-// Optimistisch angezeigte Nachricht, deren POST die Antwort verloren hat:
-// { text, messageCount, emptyPolls } -- wird aufgeloest, sobald der Server
-// sie kennt (oder nach zwei Polls ohne sie als "nicht angenommen" verworfen).
+// Optimistically displayed message whose POST lost its response:
+// { text, messageCount, emptyPolls } -- resolved as soon as the server knows
+// it (or discarded as "not accepted" after two polls without it).
 let pendingSend = null;
 
 function startRecovery(statusText) {
@@ -667,17 +666,17 @@ function startRecovery(statusText) {
     } catch (e) {
       if (e.status === 404) {
         stopRecovery();
-        setStatus('Session auf dem Server nicht mehr vorhanden.', true);
+        setStatus('Session no longer exists on the server.', true);
         return;
       }
-      setStatus('Server nicht erreichbar – neuer Versuch ...', true);
+      setStatus('Server not reachable – retrying ...', true);
       setTimeout(tick, RECOVERY_POLL_MS);
       return;
     }
     if (sid !== sessionId) return;
     const msgCount = (session.messages || []).length;
     if (pendingSend && msgCount > pendingSend.messageCount) {
-      pendingSend = null;  // Server hat die Nachricht angenommen
+      pendingSend = null;  // the server accepted the message
     }
     if (sessionSignature(session) !== lastRenderSig) {
       renderHistory(session);
@@ -686,18 +685,18 @@ function startRecovery(statusText) {
     if (pendingSend && !running) {
       pendingSend.emptyPolls += 1;
       if (pendingSend.emptyPolls >= 2) {
-        // Server kennt die Nachricht nicht -> sie wurde nie ausgefuehrt.
+        // The server does not know the message -> it was never executed.
         renderHistory(session);
         if (!input.value) input.value = pendingSend.text;
         pendingSend = null;
         stopRecovery();
-        setStatus('Nachricht wurde nicht verarbeitet (Verbindung verloren) – bitte erneut senden.', true);
+        setStatus('Message was not processed (connection lost) – please send it again.', true);
         return;
       }
     }
     if (running || pendingSend) {
       liveMetaEl.textContent = running
-        ? `läuft (pid ${running.pid}) – Live-Log nach Verbindungsverlust nicht verfügbar.`
+        ? `running (pid ${running.pid}) – live log not available after connection loss.`
         : liveMetaEl.textContent;
       setTimeout(tick, RECOVERY_POLL_MS);
       return;
@@ -705,7 +704,7 @@ function startRecovery(statusText) {
     const last = (session.stages || []).slice(-1)[0];
     stopRecovery();
     setStatus('');
-    if (last) liveMetaEl.textContent = `Letzte Stage beendet (${last.status}).`;
+    if (last) liveMetaEl.textContent = `Last stage finished (${last.status}).`;
     refreshContextPreview();
   };
   tick();
@@ -738,20 +737,20 @@ abortBtn.addEventListener('click', async () => {
   try {
     const r = await fetch(`${API}/sessions/${sessionId}/abort`, { method: 'POST' });
     if (r.ok) {
-      // Endstatus direkt aus der Abort-Antwort anzeigen -- wichtig nach einem
-      // Reload, wenn kein SSE-Stream mehr das Terminal-Event liefert.
+      // Show the final status directly from the abort response -- important after
+      // a reload, when no SSE stream delivers the terminal event anymore.
       const data = await r.json();
       const div = data.stage && findStageDiv(data.stage.stage_id);
       if (div) updateStageMessage(div, data.stage);
     } else if (r.status === 409) {
-      // Stage war schon beendet (natuerliches Ende kam zuvor) -> Status abgleichen.
+      // Stage had already finished (natural end came first) -> sync the status.
       if (!sseActive) startRecovery();
     } else {
-      setStatus(`Abbruch fehlgeschlagen: HTTP ${r.status}`, true);
+      setStatus(`Abort failed: HTTP ${r.status}`, true);
     }
-  } catch (e) { setStatus('Abbruch fehlgeschlagen: ' + e, true); }
+  } catch (e) { setStatus('Abort failed: ' + e, true); }
   abortBtn.disabled = false;
-  // Ohne aktiven SSE-Stream bestaetigt der Recovery-Poll den Endstatus.
+  // Without an active SSE stream the recovery poll confirms the final status.
   if (!sseActive && sessionId) startRecovery();
 });
 
@@ -765,7 +764,7 @@ async function sendMessage() {
   const stageDiv = addStageMessage();
 
   setRunningUi(true);
-  setStatus('Verbinde ...');
+  setStatus('Connecting ...');
 
   const body = {
     message: text,
@@ -784,13 +783,13 @@ async function sendMessage() {
       body: JSON.stringify(body),
     });
     if (resp.status === 409) {
-      // Nicht angenommen: optimistische Anzeige entfernen (sonst Phantom-
-      // Nachricht) und den tatsaechlich laufenden Stand vom Server holen.
+      // Not accepted: remove the optimistic display (otherwise a phantom
+      // message) and fetch the actually running state from the server.
       sseActive = false;
       userDiv.remove();
       stageDiv.remove();
       if (!input.value) input.value = text;
-      startRecovery('Es läuft bereits eine Stage in dieser Session – Status wird geladen ...');
+      startRecovery('A stage is already running in this session – loading status ...');
       return;
     }
     if (!resp.ok) {
@@ -800,7 +799,7 @@ async function sendMessage() {
       stageDiv.remove();
       if (!input.value) input.value = text;
       setRunningUi(false);
-      setStatus(`Fehler ${resp.status}: ${errBody}`, true);
+      setStatus(`Error ${resp.status}: ${errBody}`, true);
       return;
     }
     await readSseStream(resp.body, stageDiv, sse);
@@ -813,13 +812,13 @@ async function sendMessage() {
     setStatus('');
     return;
   }
-  // Stream abgerissen oder ohne Terminal-Event beendet: Stage laeuft ggf.
-  // serverseitig weiter. NICHT erneut senden -- Status ueber die Session-API
-  // abgleichen. War stage_started noch nicht da, ist unklar, ob der Server die
-  // Nachricht angenommen hat -> pendingSend klaert das beim Pollen.
+  // Stream broke off or ended without a terminal event: the stage may keep
+  // running on the server. Do NOT send again -- sync the status via the session
+  // API. If stage_started had not arrived yet, it is unclear whether the server
+  // accepted the message -> pendingSend resolves that while polling.
   if (!sse.started) pendingSend = { text, messageCount, emptyPolls: 0 };
-  startRecovery('Verbindung unterbrochen' + (lostError ? ` (${lostError.message || lostError})` : '')
-    + ' – Stage-Status wird vom Server nachgeladen ...');
+  startRecovery('Connection interrupted' + (lostError ? ` (${lostError.message || lostError})` : '')
+    + ' – fetching the stage status from the server ...');
 }
 
 async function readSseStream(bodyStream, stageDiv, sse) {
@@ -853,13 +852,13 @@ function handleSseFrame(frame, stageDiv, sse) {
   if (eventType === 'stage_started') {
     sse.started = true;
     stageDiv.dataset.stageId = data.stage_id;
-    setStatus(`Gestartet (pid ${data.pid}) ...`);
-    liveMetaEl.textContent = `läuft (pid ${data.pid}) ...`;
+    setStatus(`Started (pid ${data.pid}) ...`);
+    liveMetaEl.textContent = `running (pid ${data.pid}) ...`;
     liveLogEl.textContent = '';
     substagesListEl.innerHTML = '';
-    substagesMetaEl.textContent = 'Keine Sub-Stages in dieser Stage.';
+    substagesMetaEl.textContent = 'No sub-stages in this stage.';
   } else if (eventType === 'heartbeat') {
-    setStatus(`läuft seit ${data.elapsed_s}s ...`);
+    setStatus(`running for ${data.elapsed_s}s ...`);
   } else if (eventType === 'log_line') {
     liveLogEl.textContent += (liveLogEl.textContent ? '\n' : '') + data.text;
     liveLogEl.scrollTop = liveLogEl.scrollHeight;
@@ -868,7 +867,7 @@ function handleSseFrame(frame, stageDiv, sse) {
     sse.completed = true;
     updateStageMessage(stageDiv, data);
     setStatus('');
-    liveMetaEl.textContent = `Letzte Stage beendet (${data.status}).`;
+    liveMetaEl.textContent = `Last stage finished (${data.status}).`;
     refreshContextPreview();
   }
   logEl.scrollTop = logEl.scrollHeight;
@@ -879,11 +878,13 @@ const dotApi = document.getElementById('dot-api');
 const dotOllama = document.getElementById('dot-ollama');
 const dotRunner = document.getElementById('dot-runner');
 
-// run_substage blockiert (subprocess.run) -- stage_runner.py loggt deshalb NICHTS
-// waehrend eine Sub-Stage laeuft, nur einen Start-Marker (von uns ergaenzt) und am
-// Ende die normale TOOL-run_substage(...)-Zeile (dispatch-Schleife, kommt erst NACH
-// Abschluss). Client-seitiges Mustererkennen auf dem Log-Text, rein kosmetisch --
-// main.py interpretiert den Log-Text selbst nirgends (Zielarchitektur-Konstante).
+// run_substage blocks (subprocess.run) -- stage_runner.py therefore logs NOTHING
+// while a sub-stage runs, only a start marker (added by us) and at the end the
+// normal TOOL run_substage(...) line (dispatch loop, comes only AFTER completion).
+// Client-side pattern matching on the log text, purely cosmetic -- main.py itself
+// never interprets the log text (target architecture constant).
+// The marker text "run_substage GESTARTET:" is emitted by stage_runner.py and must
+// match the runner output exactly (it is not a Reaper-AI GUI string).
 let openSubstages = [];
 function handleSubstageLogLine(text) {
   const startMatch = text.match(/run_substage GESTARTET: (.*)$/);
@@ -893,7 +894,7 @@ function handleSubstageLogLine(text) {
     li.querySelector('.stext').textContent = startMatch[1];
     substagesListEl.appendChild(li);
     openSubstages.push(li);
-    substagesMetaEl.textContent = `${openSubstages.length} Sub-Stage(s) in dieser Stage.`;
+    substagesMetaEl.textContent = `${openSubstages.length} sub-stage(s) in this stage.`;
     return;
   }
   if (/TOOL run_substage\(/.test(text)) {
@@ -915,7 +916,7 @@ async function pollHealth() {
     setDot(dotOllama, h.ollama === 'ok' ? 'ok' : 'down');
     setDot(dotRunner, h.stage_runner === 'ok' ? 'ok' : 'missing');
   } catch (e) {
-    // API selbst nicht erreichbar -- alles unbekannt/down, keine Folgeschluesse moeglich.
+    // API itself not reachable -- everything unknown/down, no further conclusions possible.
     setDot(dotApi, 'down');
     setDot(dotOllama, 'down');
     setDot(dotRunner, 'down');

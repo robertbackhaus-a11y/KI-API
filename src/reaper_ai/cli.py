@@ -1,18 +1,18 @@
 # Copyright (C) 2026 Robert Backhaus
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-"""Kommandozeile `reaper-ai`:
+"""Command line `reaper-ai`:
 
     reaper-ai run      [--host H] [--port P] [--data-dir D] [--ollama-url U]
                        [--runner-dir R] [--no-browser]
     reaper-ai stop     [--data-dir D]
-    reaper-ai migrate  QUELLVERZEICHNIS [--data-dir D]
+    reaper-ai migrate  SOURCE_DIR [--data-dir D]
     reaper-ai --version
 
-`run` startet die bestehende FastAPI-App (reaper_ai.main:app) mit uvicorn im
-Vordergrund (einzelner Prozess, wie bisher run.ps1) und legt eine PID-Datei im
-Datenverzeichnis ab; `stop` beendet genau diesen Prozess(baum). Der Stage-Runner
-bleibt ein externer Subprozess und wird hier nur auf Vorhandensein geprueft.
+`run` starts the existing FastAPI app (reaper_ai.main:app) with uvicorn in the
+foreground (single process, as run.ps1 did before) and writes a PID file into the
+data directory; `stop` terminates exactly that process (tree). The stage runner
+stays an external subprocess and is only checked for presence here.
 """
 
 from __future__ import annotations
@@ -45,7 +45,7 @@ def _port_open(host: str, port: int, timeout_s: float = 0.5) -> bool:
 
 
 def _connect_host(host: str) -> str:
-    # 0.0.0.0/:: lauschen auf allen Adressen -- fuer Browser/Pruefung Loopback verwenden.
+    # 0.0.0.0/:: listen on all addresses -- use loopback for the browser/checks.
     return "127.0.0.1" if host in ("0.0.0.0", "::", "") else host
 
 
@@ -85,8 +85,8 @@ def _read_pid_file(data_dir: Path) -> dict | None:
 
 
 def _resolve(args: argparse.Namespace) -> Path:
-    """CLI-Optionen > Env-Vars > config.toml > Default; Ergebnis landet in os.environ,
-    wo main.py es beim Import liest. Liefert das Datenverzeichnis."""
+    """CLI options > env vars > config.toml > default; the result ends up in
+    os.environ, where main.py reads it on import. Returns the data directory."""
     if getattr(args, "data_dir", None):
         os.environ["REAPER_AI_HOME"] = str(Path(args.data_dir).expanduser().resolve())
     data_dir = config.data_dir()
@@ -112,19 +112,19 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     info = _read_pid_file(data_dir)
     if info and _pid_alive(int(info.get("pid", 0))):
-        print(f"Reaper-AI laeuft bereits (PID {info['pid']}, {info.get('url')}). "
-              f"Beenden mit: reaper-ai stop", file=sys.stderr)
+        print(f"Reaper-AI is already running (PID {info['pid']}, {info.get('url')}). "
+              f"Stop it with: reaper-ai stop", file=sys.stderr)
         return 1
     if _port_open(_connect_host(host), port):
-        print(f"Port {port} ist bereits belegt -- anderen Port mit --port waehlen.", file=sys.stderr)
+        print(f"Port {port} is already in use -- choose another port with --port.", file=sys.stderr)
         return 1
 
     data_dir.mkdir(parents=True, exist_ok=True)
     if host not in LOOPBACK_HOSTS:
-        print(f"WARNUNG: Bind-Adresse {host} ist nicht Loopback. Reaper-AI hat keine "
-              f"Authentifizierung und ist fuer lokalen Single-User-Betrieb gedacht.", file=sys.stderr)
+        print(f"WARNING: bind address {host} is not loopback. Reaper-AI has no "
+              f"authentication and is intended for local single-user operation.", file=sys.stderr)
 
-    # Reihenfolge wie in main.py: Verzeichnis zuerst, Python/Skript einzeln uebersteuerbar.
+    # Same order as in main.py: directory first, Python/script can be overridden individually.
     runner_dir = Path(os.environ.get("REAPER_STAGE_RUNNER_DIR") or config.DEFAULT_RUNNER_DIR)
     runner_py = Path(os.environ.get("REAPER_STAGE_PYTHON") or config.default_runner_python(runner_dir))
     runner_script = Path(os.environ.get("REAPER_STAGE_RUNNER_SCRIPT") or runner_dir / "stage_runner.py")
@@ -132,11 +132,11 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     print(f"Reaper-AI {__version__}")
     print(f"  GUI:          {url}")
-    print(f"  Daten:        {data_dir}")
-    print(f"  Stage-Runner: {runner_script}" + ("" if runner_script.exists() and runner_py.exists()
-                                              else "  (NICHT GEFUNDEN -- Stages schlagen fehl)"))
+    print(f"  Data:         {data_dir}")
+    print(f"  Stage runner: {runner_script}" + ("" if runner_script.exists() and runner_py.exists()
+                                              else "  (NOT FOUND -- stages will fail)"))
     print(f"  Ollama:       {config.ollama_url()}" + ("" if _port_open(o_host, o_port, 1.0)
-                                                    else "  (nicht erreichbar)"))
+                                                    else "  (not reachable)"))
 
     pid_path = data_dir / PID_FILE
     pid_path.write_text(json.dumps({"pid": os.getpid(), "host": host, "port": port, "url": url}),
@@ -167,26 +167,26 @@ def cmd_stop(args: argparse.Namespace) -> int:
     pid_path = data_dir / PID_FILE
     info = _read_pid_file(data_dir)
     if not info:
-        print(f"Reaper-AI laeuft nicht (keine PID-Datei in {data_dir}).")
+        print(f"Reaper-AI is not running (no PID file in {data_dir}).")
         return 0
     pid = int(info.get("pid", 0))
     if not pid or not _pid_alive(pid):
         pid_path.unlink(missing_ok=True)
-        print("Reaper-AI laeuft nicht (veraltete PID-Datei entfernt).")
+        print("Reaper-AI is not running (stale PID file removed).")
         return 0
-    # Gegen PID-Wiederverwendung: nur beenden, wenn der eingetragene Port noch lauscht.
+    # Guard against PID reuse: only terminate if the recorded port is still listening.
     if not _port_open(_connect_host(info.get("host", "")), int(info.get("port", 0))):
-        print(f"PID {pid} lebt, aber Port {info.get('port')} lauscht nicht -- vermutlich "
-              f"nicht Reaper-AI. Nichts beendet; PID-Datei entfernt.", file=sys.stderr)
+        print(f"PID {pid} is alive, but port {info.get('port')} is not listening -- probably "
+              f"not Reaper-AI. Nothing terminated; PID file removed.", file=sys.stderr)
         pid_path.unlink(missing_ok=True)
         return 1
     if sys.platform == "win32":
-        # /T: ganzer Prozessbaum (wie stop.ps1); laufende Stages sterben ueber ihr
-        # Job-Object (KILL_ON_JOB_CLOSE) mit und erscheinen nach dem Neustart als "incomplete".
+        # /T: whole process tree (like stop.ps1); running stages die along with it via
+        # their job object (KILL_ON_JOB_CLOSE) and show up as "incomplete" after a restart.
         rc = subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
                             capture_output=True, text=True).returncode
         if rc != 0:
-            print(f"taskkill fuer PID {pid} fehlgeschlagen (rc={rc}).", file=sys.stderr)
+            print(f"taskkill for PID {pid} failed (rc={rc}).", file=sys.stderr)
             return 1
     else:
         import signal
@@ -196,24 +196,24 @@ def cmd_stop(args: argparse.Namespace) -> int:
             break
         time.sleep(0.25)
     pid_path.unlink(missing_ok=True)
-    print(f"Reaper-AI gestoppt (PID {pid}).")
+    print(f"Reaper-AI stopped (PID {pid}).")
     return 0
 
 
 def cmd_migrate(args: argparse.Namespace) -> int:
-    """Kopiert Sessions aus einem alten Checkout (<quelle>/sessions/*.jsonl) ins
-    Datenverzeichnis. Nur kopieren: Quelle bleibt unveraendert, vorhandene Dateien im
-    Ziel werden nie ueberschrieben."""
+    """Copies sessions from an old checkout (<source>/sessions/*.jsonl) into the
+    data directory. Copy only: the source stays unchanged, existing files in the
+    target are never overwritten."""
     data_dir = _resolve(args)
     src = Path(args.source).expanduser().resolve()
     src_sessions = src / "sessions" if (src / "sessions").is_dir() else src
     dst_sessions = data_dir / "sessions"
     if src_sessions.resolve() == dst_sessions.resolve():
-        print("Quelle und Ziel sind identisch -- nichts zu tun.")
+        print("Source and target are identical -- nothing to do.")
         return 0
     files = sorted(src_sessions.glob("*.jsonl"))
     if not files:
-        print(f"Keine Sessions (*.jsonl) in {src_sessions} gefunden.", file=sys.stderr)
+        print(f"No sessions (*.jsonl) found in {src_sessions}.", file=sys.stderr)
         return 1
     dst_sessions.mkdir(parents=True, exist_ok=True)
     copied = skipped = 0
@@ -224,37 +224,37 @@ def cmd_migrate(args: argparse.Namespace) -> int:
             continue
         shutil.copy2(f, target)
         copied += 1
-    print(f"{copied} Session(s) nach {dst_sessions} kopiert, {skipped} bereits vorhanden "
-          f"(nicht ueberschrieben). Quelle unveraendert.")
+    print(f"{copied} session(s) copied to {dst_sessions}, {skipped} already present "
+          f"(not overwritten). Source unchanged.")
     if copied and _read_pid_file(data_dir):
-        print("Hinweis: Reaper-AI neu starten, damit die Sessions geladen werden.")
+        print("Note: restart Reaper-AI so the sessions are loaded.")
     return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="reaper-ai", description="Reaper-AI: lokale Chat-GUI fuer den Stage-Runner.")
+    p = argparse.ArgumentParser(prog="reaper-ai", description="Reaper-AI: local chat GUI for the stage runner.")
     p.add_argument("--version", action="version", version=f"reaper-ai {__version__}")
     sub = p.add_subparsers(dest="command", required=True)
 
     def add_data_dir(sp: argparse.ArgumentParser) -> None:
-        sp.add_argument("--data-dir", help="Datenverzeichnis (Sessions, config.toml); "
-                                           "Default: REAPER_AI_HOME bzw. %%LOCALAPPDATA%%\\reaper-ai")
+        sp.add_argument("--data-dir", help="data directory (sessions, config.toml); "
+                                           "default: REAPER_AI_HOME or %%LOCALAPPDATA%%\\reaper-ai")
 
-    run = sub.add_parser("run", help="Server starten (Vordergrund) und GUI im Browser oeffnen")
+    run = sub.add_parser("run", help="start the server (foreground) and open the GUI in the browser")
     add_data_dir(run)
-    run.add_argument("--host", help=f"Bind-Adresse (Default {config.DEFAULT_HOST})")
-    run.add_argument("--port", type=int, help=f"Port (Default {config.DEFAULT_PORT})")
-    run.add_argument("--ollama-url", help=f"Ollama-Endpunkt (Default {config.DEFAULT_OLLAMA_URL})")
-    run.add_argument("--runner-dir", help=f"Verzeichnis von stage_runner.py (Default {config.DEFAULT_RUNNER_DIR})")
-    run.add_argument("--no-browser", action="store_true", help="Browser nicht automatisch oeffnen")
+    run.add_argument("--host", help=f"bind address (default {config.DEFAULT_HOST})")
+    run.add_argument("--port", type=int, help=f"port (default {config.DEFAULT_PORT})")
+    run.add_argument("--ollama-url", help=f"Ollama endpoint (default {config.DEFAULT_OLLAMA_URL})")
+    run.add_argument("--runner-dir", help=f"directory of stage_runner.py (default {config.DEFAULT_RUNNER_DIR})")
+    run.add_argument("--no-browser", action="store_true", help="do not open the browser automatically")
     run.set_defaults(func=cmd_run)
 
-    stop = sub.add_parser("stop", help="laufenden Server beenden")
+    stop = sub.add_parser("stop", help="stop the running server")
     add_data_dir(stop)
     stop.set_defaults(func=cmd_stop)
 
-    mig = sub.add_parser("migrate", help="Sessions aus einem alten Checkout uebernehmen (nur kopieren)")
-    mig.add_argument("source", help="altes Reaper-AI-Verzeichnis oder dessen sessions/-Ordner")
+    mig = sub.add_parser("migrate", help="import sessions from an old checkout (copy only)")
+    mig.add_argument("source", help="old Reaper-AI directory or its sessions/ folder")
     add_data_dir(mig)
     mig.set_defaults(func=cmd_migrate)
     return p

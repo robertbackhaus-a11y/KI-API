@@ -8,13 +8,13 @@ tasks/
 *.done
 *.jsonl
 
-# Testverzeichnisse/-skripte: lokal behalten, nicht versioniert.
+# Test directories/scripts: kept locally, not versioned.
 test-p3*
 test-p4/
 test-p5/
 test-queue/
 
-# Paketbau (pip wheel / python -m build)
+# Package build (pip wheel / python -m build)
 build/
 dist/
 *.egg-info/

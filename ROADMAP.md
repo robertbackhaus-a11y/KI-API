@@ -3,58 +3,68 @@ Copyright (C) 2026 Robert Backhaus
 SPDX-License-Identifier: GPL-3.0-or-later
 -->
 
-# Reaper-AI – Entwicklungsroadmap
+# Reaper-AI – Development Roadmap
 
 **Repository:** `C:\tools\src\Reaper-AI`  
-**Plattform:** Windows 11 / Python / FastAPI / Ollama  
-**Installation:** Python-Pakete ausschließlich über `pip` in `.venv`  
-**Architektur:** Lokales Single-User-System
+**Platform:** Windows 11 / Python / FastAPI / Ollama  
+**Installation:** Python packages only via `pip` into `.venv`  
+**Architecture:** Local single-user system
 
-## Verbindliche Regeln
+## Mandatory Rules
 
-1. Bestehende FastAPI-Architektur beibehalten.
-2. `stage_runner.py` bleibt alleiniger KI-Orchestrator.
-3. Keine zusätzlichen Dienste, Datenbanken, Container oder Frontend-Build-Systeme.
-4. Neue Python-Abhängigkeiten ausschließlich über `pip` installieren und in `requirements.txt` mit festen Versionen dokumentieren.
-5. JavaScript-/CSS-Bibliotheken bei Bedarf als lokale, versionierte Dateien einbinden. Keine CDN-Abhängigkeiten im Betrieb, kein npm.
-6. Bestehende Funktionen erhalten und nach jeder Phase Regressionstests durchführen.
-7. Testskripte lokal behalten und von Git ausschließen.
-8. Änderungen pro Arbeitspaket getrennt umsetzen. Nicht automatisch committen, pushen oder deployen.
-9. Copyright- und SPDX-Header in neuen Quellcodedateien beachten.
-10. Keine unnötigen Refactorings.
+1. Keep the existing FastAPI architecture.
+2. `stage_runner.py` remains the sole AI orchestrator.
+3. No additional services, databases, containers or frontend build systems.
+4. Install new Python dependencies only via `pip` and document them in `requirements.txt` with pinned versions.
+5. Bundle JavaScript/CSS libraries as local, versioned files when needed. No CDN dependencies at runtime, no npm.
+6. Preserve existing functionality and run regression tests after every phase.
+7. Keep test scripts local and excluded from Git.
+8. Implement changes separately per work package. Do not commit, push or deploy automatically.
+9. Observe copyright and SPDX headers in new source files.
+10. No unnecessary refactoring.
 
-## Verbindliche Entwicklungsregeln
+## Development Guidelines
 
-Gilt automatisch für sämtliche zukünftigen Bugfixes, Features, Entwicklungsphasen und Arbeitspakete:
+Apply automatically to all future bugfixes, features, development phases, work packages and releases:
 
-1. Nach jeder Implementierung müssen `README.md`, `ROADMAP.md` und betroffene Dateien unter `docs/` geprüft und bei Bedarf aktualisiert werden.
-2. Neue Funktionen, API-Endpunkte, Konfigurationsparameter, CLI-Befehle und Architekturänderungen müssen dokumentiert werden.
-3. Abgeschlossene Arbeitspakete in der Roadmap als erledigt markieren.
-4. Veraltete oder widersprüchliche Dokumentation korrigieren.
-5. README bleibt die kompakte Projektübersicht; technische Details gehören nach `docs/`.
-6. Dokumentation muss dem tatsächlichen Implementierungsstand entsprechen.
-7. Ein Arbeitspaket gilt erst als abgeschlossen, wenn Code, Tests und Dokumentation konsistent sind.
-8. Neue und geänderte Quellcodedateien müssen den Copyright-/SPDX-Header enthalten.
-9. Testdateien bleiben lokal und außerhalb der Git-Versionsverwaltung.
+1. After every implementation, `README.md`, `ROADMAP.md` and the affected files under `docs/` must be reviewed and updated if necessary.
+2. New features, API endpoints, configuration parameters, CLI commands and architecture changes must be documented.
+3. Mark completed work packages as done in the roadmap.
+4. Correct outdated or contradictory documentation.
+5. The README stays the compact project overview; technical details belong in `docs/`.
+6. Documentation must match the actual state of the implementation.
+7. A work package is only complete when code, tests and documentation are consistent.
+8. New and changed source files must contain the copyright/SPDX header.
+9. Test files stay local and outside Git version control.
+10. **Language policy:** English is the default language for the entire Reaper-AI project. This applies to:
+    - source code, comments, docstrings and copyright headers
+    - README, ROADMAP and all documentation
+    - CLI commands, help messages and API responses
+    - GUI labels, buttons, status messages and error messages
+    - log messages and configuration descriptions
+    - commit messages and release notes
 
-Zuordnung in `docs/`: `api.md` (Endpunkte, SSE, Status), `gui.md` (Chat-GUI, Bibliotheken), `betrieb.md` (Installation, CLI, Konfiguration), `architektur.md` (Komponenten, Abläufe, Persistenz, Paketstruktur).
+    Existing German text is translated into English without changing functionality.
+    Exceptions: user prompts, AI-generated responses and stored conversation content keep their original language; Reaper continues to communicate with users in their preferred language. Protocol text emitted by the unchanged `stage_runner.py` (e.g. the `=== STAGE BEENDET` summary marker and the `run_substage GESTARTET:` log marker) is matched verbatim and therefore stays as the runner writes it.
 
-## Phase 0 – Verbleibende Bugfixes
+Mapping in `docs/`: `api.md` (endpoints, SSE, status), `gui.md` (chat GUI, libraries), `operations.md` (installation, CLI, configuration), `architecture.md` (components, flows, persistence, package layout).
 
-| ID | Aufgabe | Priorität | Stand |
+## Phase 0 – Remaining Bugfixes
+
+| ID | Task | Priority | Status |
 |---|---|---|---|
-| B01 | Globale Begrenzung paralleler GPU-intensiver Haupt-Stages | P2 | offen |
-| B02 | Fehlerbehandlung bei fehlgeschlagenem `TerminateJobObject()` prüfen und absichern | P2 | offen |
-| B03 | Thread-Synchronisierung der Session-Zustände prüfen und korrigieren | P2 | offen |
-| B04 | SSE-Recovery-Polling und unnötiges Neuzeichnen optimieren | P2 | teilweise: Recovery pollt alle 2 s, Verlauf wird nur bei geänderter Nachrichtenzahl/Stage-Status neu aufgebaut, Markdown-Rendering gecacht; der Neuaufbau selbst ist weiterhin vollständig |
-| B05 | JSONL-Recovery bei unvollständigen Events härten | P3 | offen |
-| B06 | Speicher- und Handle-Freigabe bei längeren Sessions prüfen | P3 | offen |
+| B01 | Global limit for parallel GPU-intensive main stages | P2 | open |
+| B02 | Review and harden error handling when `TerminateJobObject()` fails | P2 | open |
+| B03 | Review and fix thread synchronization of session state | P2 | open |
+| B04 | Optimize SSE recovery polling and unnecessary redraws | P2 | partial: recovery polls every 2 s, the history is only rebuilt when the message count/stage status changed, Markdown rendering is cached; the rebuild itself is still complete |
+| B05 | Harden JSONL recovery for incomplete events | P3 | open |
+| B06 | Review memory and handle release in longer sessions | P3 | open |
 
-**Abnahme:** Alle bisherigen 73 Regressionstests und neu ergänzte Tests bestanden. Keine Prozessleichen, Deadlocks oder unkontrollierten parallelen GPU-Läufe.
+**Acceptance:** All previous 73 regression tests and newly added tests pass. No zombie processes, deadlocks or uncontrolled parallel GPU runs.
 
-## Phase P – Paketierung als pip-Paket
+## Phase P – Packaging as a pip Package
 
-Eigenes Arbeitspaket vor den weiteren GUI-Erweiterungen (Phase 1 ff.). Ziel: Installation und Start wie bei Chainlit.
+Separate work package before the further GUI extensions (phase 1 onwards). Goal: installation and start like Chainlit.
 
 ```
 pip install reaper-ai
@@ -63,100 +73,111 @@ reaper-ai stop
 reaper-ai --version
 ```
 
-| ID | Aufgabe | Stand |
+| ID | Task | Status |
 |---|---|---|
-| P01 | `pyproject.toml` und `src/`-Layout (`src/reaper_ai/`) | umgesetzt |
-| P02 | CLI-Einstiegspunkt `reaper-ai` über `[project.scripts]` (`run`, `stop`, `migrate`, `--version`) | umgesetzt |
-| P03 | FastAPI-App, Web-GUI und `web/vendor/` vollständig im Paket | umgesetzt |
-| P04 | Sessions, Temp-Tasks, Konfiguration und PID-Datei außerhalb des Pakets (`%LOCALAPPDATA%\reaper-ai`, `--data-dir` / `REAPER_AI_HOME`) | umgesetzt |
-| P05 | Stage-Runner weiterhin externer Subprozess, `stage_runner.py` unverändert | umgesetzt |
-| P06 | Runner-Pfad und Ollama-Endpunkt konfigurierbar (CLI > Env > `config.toml` > Default) | umgesetzt |
-| P07 | Lokale Installation `pip install -e .` in frischer venv getestet | umgesetzt |
-| P08 | Wheel gebaut und Installation in frischer venv getestet | umgesetzt |
-| P09 | Bestehende Sessions übernehmen: `reaper-ai migrate <checkout>` (nur kopieren); Checkout-Betrieb (`run.ps1`) nutzt weiter `sessions/` im Repo | umgesetzt |
-| P10 | PyPI-Veröffentlichung vorbereitet (`python -m build`, `twine check`), Upload erst nach Freigabe, zuerst TestPyPI | vorbereitet |
+| P01 | `pyproject.toml` and `src/` layout (`src/reaper_ai/`) | done |
+| P02 | CLI entry point `reaper-ai` via `[project.scripts]` (`run`, `stop`, `migrate`, `--version`) | done |
+| P03 | FastAPI app, web GUI and `web/vendor/` fully included in the package | done |
+| P04 | Sessions, temp tasks, configuration and PID file outside the package (`%LOCALAPPDATA%\reaper-ai`, `--data-dir` / `REAPER_AI_HOME`) | done |
+| P05 | Stage runner remains an external subprocess, `stage_runner.py` unchanged | done |
+| P06 | Runner path and Ollama endpoint configurable (CLI > env > `config.toml` > default) | done |
+| P07 | Local installation `pip install -e .` tested in a fresh venv | done |
+| P08 | Wheel built and installation tested in a fresh venv | done |
+| P09 | Take over existing sessions: `reaper-ai migrate <checkout>` (copy only); checkout operation (`run.ps1`) keeps using `sessions/` in the repo | done |
+| P10 | PyPI publication prepared (`python -m build`, `twine check`), upload only after approval, TestPyPI first | prepared |
 
-Keine neuen Backend-Dienste, keine zusätzlichen Frameworks, keine funktionalen Änderungen am Stage-Runner. Hinweis: `ollama_url` wirkt auf Health-Ampel und Startprüfung; `stage_runner.py` nutzt weiterhin seine fest eingetragene URL.
+No new backend services, no additional frameworks, no functional changes to the stage runner. Note: `ollama_url` affects the health light and the startup check; `stage_runner.py` still uses its hard-coded URL.
 
-**Abnahme:** Alle Regressionstests grün, `reaper-ai run/stop/--version` aus editierbarer und aus Wheel-Installation funktionsfähig, bestehende Sessions erhalten.
+**Acceptance:** All regression tests green, `reaper-ai run/stop/--version` working from an editable and from a wheel installation, existing sessions preserved.
 
-## Phase 1 – Chat-Basis
+## Phase L – English Language Policy
 
-| ID | Feature | Stand |
+| ID | Task | Status |
 |---|---|---|
-| F01 | Markdown-Rendering | umgesetzt (marked 15.0.12, GFM, bereinigt mit DOMPurify 3.4.16) |
-| F02 | Syntax-Highlighting für Code | umgesetzt (highlight.js 11.12.0 inkl. PowerShell, Theme hell/dunkel) |
-| F03 | Copy-Buttons für Antworten und Codeblöcke | umgesetzt |
-| F04 | Session-Liste und Chat-Wechsel | offen |
-| F05 | Sessions umbenennen und löschen | offen |
-| F06 | Chat-Export als Markdown | offen |
+| L01 | Language policy added to the development guidelines | done |
+| L02 | Code comments, docstrings, log messages, API error texts and CLI output translated | done |
+| L03 | GUI labels, buttons and status messages translated (`<html lang="en">`) | done |
+| L04 | README, ROADMAP and `docs/` translated; `docs/betrieb.md` → `docs/operations.md`, `docs/architektur.md` → `docs/architecture.md` | done |
 
-Markdown-Ausgabe gegen unsicheres HTML absichern. Rendering nur bei geänderten Nachrichten. Lokale JavaScript-Bibliotheken ohne npm verwenden. F01 bis F03 erfüllen das: Bibliotheken liegen in `src/reaper_ai/web/vendor/` (Details in `docs/gui.md`).
+Runner protocol markers stay unchanged (see guideline 10). Stage summaries already stored in existing sessions are conversation content and are not rewritten.
 
-## Phase 2 – Dateiunterstützung
+## Phase 1 – Chat Basics
 
-| ID | Feature |
-|---|---|
-| F07 | Datei-Upload über FastAPI |
-| F08 | Ablage von Dateien je Session |
-| F09 | Bildvorschau und Dateianhänge im Chat |
-| F10 | Dateigrößen- und Typprüfung |
+| ID | Feature | Status |
+|---|---|---|
+| F01 | Markdown rendering | done (marked 15.0.12, GFM, sanitized with DOMPurify 3.4.16) |
+| F02 | Syntax highlighting for code | done (highlight.js 11.12.0 incl. PowerShell, light/dark theme) |
+| F03 | Copy buttons for answers and code blocks | done |
+| F04 | Session list and chat switching | open |
+| F05 | Rename and delete sessions | open |
+| F06 | Chat export as Markdown | open |
 
-`python-multipart` über `pip` installieren. Keine generelle Dateiverarbeitung in der API; die fachliche Verarbeitung bleibt beim Runner. Uploads liegen im Datenverzeichnis (Phase P), nicht im Paket.
+Protect Markdown output against unsafe HTML. Render only changed messages. Use local JavaScript libraries without npm. F01 to F03 fulfill this: the libraries live in `src/reaper_ai/web/vendor/` (details in `docs/gui.md`).
 
-## Phase 3 – Agenten-Monitoring
-
-| ID | Feature |
-|---|---|
-| F11 | Strukturierte Stage-/Substage-Events |
-| F12 | Tool-Aufrufe mit Status und Laufzeit |
-| F13 | Technischen Status und fachliches Ergebnis getrennt anzeigen |
-| F14 | Fehler- und Abbruchursachen nachvollziehbar darstellen |
-
-Strukturierte Ereignisse statt Logtext-Parsing. Bestehendes SSE erweitern, kein neues Protokoll oder Message-Broker.
-
-## Phase 4 – Chat-Workflows
+## Phase 2 – File Support
 
 | ID | Feature |
 |---|---|
-| F15 | Nachrichten bearbeiten und neu ausführen |
-| F16 | Suche über vorhandene Sessions |
-| F17 | Wiederverwendbare Prompt-Vorlagen |
+| F07 | File upload via FastAPI |
+| F08 | Per-session file storage |
+| F09 | Image preview and file attachments in the chat |
+| F10 | File size and type validation |
 
-Bei erneuter Ausführung ausdrücklich berücksichtigen, dass Tool-Aktionen wiederholt werden können.
+Install `python-multipart` via `pip`. No general file processing in the API; domain processing stays with the runner. Uploads live in the data directory (phase P), not in the package.
 
-## Phase 5 – Memory und Kontrolle
+## Phase 3 – Agent Monitoring
 
 | ID | Feature |
 |---|---|
-| F18 | Vorhandene Memory-Einträge anzeigen |
-| F19 | Memory-Einträge gezielt korrigieren |
-| F20 | Human-in-the-loop für kritische Tool-Aktionen |
+| F11 | Structured stage/sub-stage events |
+| F12 | Tool calls with status and duration |
+| F13 | Show technical status and domain result separately |
+| F14 | Present error and abort causes traceably |
 
-Keine zweite Memory-Datenbank. Human-in-the-loop benötigt eine echte Pausierung des Runners vor der Tool-Ausführung.
+Structured events instead of log-text parsing. Extend the existing SSE, no new protocol or message broker.
 
-## Phase 6 – Abschluss
+## Phase 4 – Chat Workflows
 
-- Vollständiger Regressionstest.
-- Integrationstest mit realem Ollama und Stage-Runner.
-- Prüfung von Abort, Watchdog, Recovery und parallelen Sessions.
-- Prüfung sämtlicher neuer Dateien auf Copyright-Header.
-- `requirements.txt`, README und `docs/` aktualisieren.
-- Installation in einer frischen `.venv` ausschließlich über `pip` testen.
-- Abschließenden technischen Review erstellen.
+| ID | Feature |
+|---|---|
+| F15 | Edit and re-run messages |
+| F16 | Search across existing sessions |
+| F17 | Reusable prompt templates |
 
-## Ausführungsanweisung für Claude
+When re-running, explicitly take into account that tool actions may be repeated.
 
-Arbeite die Roadmap in der angegebenen Reihenfolge ab, aber implementiere immer nur **ein Arbeitspaket pro Durchlauf**.
+## Phase 5 – Memory and Control
 
-Vor jeder Änderung den tatsächlichen Code prüfen. Bereits implementierte Funktionen nicht erneut entwickeln.
+| ID | Feature |
+|---|---|
+| F18 | Show existing memory entries |
+| F19 | Correct memory entries selectively |
+| F20 | Human-in-the-loop for critical tool actions |
 
-Nach jedem Arbeitspaket:
+No second memory database. Human-in-the-loop requires a real pause of the runner before the tool executes.
 
-1. Geänderte Dateien benennen.
-2. Testergebnisse dokumentieren.
-3. Dokumentation gemäß den verbindlichen Entwicklungsregeln aktualisieren.
-4. Verbleibende Risiken nennen.
-5. Nächstes Arbeitspaket vorschlagen.
+## Phase 6 – Completion
 
-Keine eigenständigen Commits, Pushes oder Deployments. Keine Enterprise-Erweiterungen.
+- Full regression test.
+- Integration test with a real Ollama and stage runner.
+- Verify abort, watchdog, recovery and parallel sessions.
+- Check all new files for copyright headers.
+- Update `requirements.txt`, README and `docs/`.
+- Test installation in a fresh `.venv` exclusively via `pip`.
+- Produce a final technical review.
+
+## Execution Instructions for Claude
+
+Work through the roadmap in the given order, but always implement only **one work package per run**.
+
+Check the actual code before every change. Do not re-develop functionality that is already implemented.
+
+After every work package:
+
+1. Name the changed files.
+2. Document the test results.
+3. Update the documentation according to the mandatory development guidelines.
+4. Name remaining risks.
+5. Propose the next work package.
+
+No autonomous commits, pushes or deployments. No enterprise extensions.

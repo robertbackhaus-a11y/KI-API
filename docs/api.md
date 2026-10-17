@@ -3,147 +3,157 @@ Copyright (C) 2026 Robert Backhaus
 SPDX-License-Identifier: GPL-3.0-or-later
 -->
 
-# HTTP-API
+# HTTP API
 
-Stand: Version 0.6.0. Quelle: `src/reaper_ai/main.py`.
+Status: version 0.1.0. Source: `src/reaper_ai/main.py`.
 
-Lokales Single-User-System, nur Loopback, keine Authentifizierung. Kein
-OpenAPI-Schema, keine `/docs`- oder `/redoc`-Seite (bewusst abgeschaltet).
-Standardadresse: `http://127.0.0.1:8734`.
+Local single-user system, loopback only, no authentication. No OpenAPI schema, no
+`/docs` or `/redoc` page (deliberately disabled). Default address:
+`http://127.0.0.1:8734`.
 
-## Übersicht
+## Overview
 
-| Methode | Pfad | Zweck |
+| Method | Path | Purpose |
 |---|---|---|
-| GET | `/` | Chat-GUI (`src/reaper_ai/web/index.html`), siehe [gui.md](gui.md) |
-| GET | `/vendor/<datei>` | lokal mitgelieferte GUI-Bibliotheken (statisch) |
-| GET | `/health` | Diagnose für die Ampel der GUI |
-| POST | `/sessions` | neue Session anlegen |
-| GET | `/sessions/{id}` | Session lesen |
-| GET | `/sessions/{id}/context` | Vorschau des begrenzten Kontexts für die nächste Nachricht |
-| POST | `/sessions/{id}/messages` | Stage ausführen, Fortschritt als SSE-Stream |
-| POST | `/sessions/{id}/abort` | laufende Stage abbrechen |
+| GET | `/` | Chat GUI (`src/reaper_ai/web/index.html`), see [gui.md](gui.md) |
+| GET | `/vendor/<file>` | locally bundled GUI libraries (static) |
+| GET | `/health` | diagnostics for the GUI status light |
+| POST | `/sessions` | create a new session |
+| GET | `/sessions/{id}` | read a session |
+| GET | `/sessions/{id}/context` | preview of the limited context for the next message |
+| POST | `/sessions/{id}/messages` | run a stage, progress as an SSE stream |
+| POST | `/sessions/{id}/abort` | abort the running stage |
 
 ## GET /health
 
     {"api": "ok", "ollama": "ok" | "down", "stage_runner": "ok" | "missing"}
 
-Rein diagnostisch. Ollama wird nur per TCP-Connect auf `ollama_url` geprüft (siehe
-[betrieb.md](betrieb.md)), der Runner nur auf Vorhandensein von Python und Skript.
-Die API ruft Ollama selbst nie auf; das tut ausschließlich `stage_runner.py`.
+Purely diagnostic. Ollama is only checked via a TCP connect to `ollama_url` (see
+[operations.md](operations.md)), the runner only for the presence of Python and
+script. The API never calls Ollama itself; only `stage_runner.py` does.
 
 ## POST /sessions
 
-Antwort `201` mit dem Session-Objekt. `session_id` ist eine UUID v4. Legt
-`<data-dir>/sessions/<session_id>.jsonl` mit dem Event `session_created` an.
+Response `201` with the session object. `session_id` is a UUID v4. Creates
+`<data-dir>/sessions/<session_id>.jsonl` with the event `session_created`.
 
 ## GET /sessions/{id}
 
-Antwort `200`:
+Response `200`:
 
     {
       "session_id": "...",
       "created_at": "...",
       "messages": [{"role": "user", "content": "...", "stage_id": "...", "ts": "..."}],
-      "stages":   [<Stage-Objekt>, ...]
+      "stages":   [<stage object>, ...]
     }
 
-`404` bei unbekannter Id. `messages[].content` ist immer die originale Nachricht,
-nie der um Kontext erweiterte Task-Text.
+`404` for an unknown id. `messages[].content` is always the original message,
+never the task text extended with context.
 
 ## GET /sessions/{id}/context
 
-Zeigt, welchen Kontext eine nächste Nachricht vorangestellt bekäme. Startet keine
-Stage. `404` bei unbekannter Id.
+Shows which context a next message would get prepended. Starts no stage. `404` for
+an unknown id.
 
-    {"turns_included": 3, "max_turns": 5, "max_chars": 6000, "preview": "Bisheriger Verlauf ..."}
+    {"turns_included": 3, "max_turns": 5, "max_chars": 6000, "preview": "Previous history ..."}
 
-Begrenzter Kontext: der Task-Text enthält neben der aktuellen Nachricht die letzten
-5 abgeschlossenen Turns der Session (Nutzer-Nachricht plus Stage-Zusammenfassung),
-gekappt auf 6000 Zeichen (`CONTEXT_MAX_TURNS`, `CONTEXT_MAX_CHARS`). Kein
-Vollverlauf; dauerhaftes Wissen bleibt Aufgabe des Modells per `memory_write`.
+Limited context: besides the current message, the task text contains the last
+5 completed turns of the session (user message plus stage summary), capped at
+6000 characters (`CONTEXT_MAX_TURNS`, `CONTEXT_MAX_CHARS`). No full history;
+durable knowledge remains the model's job via `memory_write`.
 
 ## POST /sessions/{id}/messages
 
-Request-Body (JSON):
+Request body (JSON):
 
     {
-      "message": "<Nutzer-Task-Text>",   # Pflicht, nicht leer und nicht nur Leerraum
-      "model":   "qwen3.8-q5:latest",    # optional, Default: Reapers Hauptmodell
-      "project": "coding-v2",            # optional, Default: Basic-Memory-Projekt
-      "think":   false                   # optional, Default false (Reasoning aus)
+      "message": "<user task text>",     # required, not empty and not whitespace only
+      "model":   "qwen3.8-q5:latest",    # optional, default: Reaper's main model
+      "project": "coding-v2",            # optional, default: Basic Memory project
+      "think":   false                   # optional, default false (reasoning off)
     }
 
-`think` wird immer explizit als `--think on|off` an den Runner gereicht. Ohne
-diesen Schalter würde der Runner `auto` nehmen und Qwen3/Q5 praktisch unbegrenzt
-nachdenken.
+`think` is always passed to the runner explicitly as `--think on|off`. Without
+this switch the runner would use `auto` and Qwen3/Q5 would think practically
+without limit.
 
-Fehler vor dem Stream-Start: `404` unbekannte Session, `409` es läuft bereits eine
-Stage in dieser Session (eine Stage pro Session gleichzeitig), `422` ungültiger Body.
+Errors before the stream starts: `404` unknown session, `409` a stage is already
+running in this session (one stage per session at a time), `422` invalid body.
 
-Antwort `200`, `Content-Type: text/event-stream`, Standard-SSE-Rahmen
-(`event: <typ>`, `data:` eine JSON-Zeile, Leerzeile als Rahmenende). Die Events
-kommen, während die Stage läuft:
+Response `200`, `Content-Type: text/event-stream`, standard SSE frames
+(`event: <type>`, `data:` one JSON line, blank line as frame end). The events
+arrive while the stage runs:
 
-    event: stage_started            # sofort nach der Startphase, immer zuerst
+    event: stage_started            # right after the start phase, always first
     data: {"stage_id": "...", "status": "running", "exit_code": null, "pid": 12345,
            "model": "qwen3.8-q5:latest", "project": "coding-v2", "started_at": "..."}
 
-    event: log_line                 # live, je vollständige stderr-Zeile des Runners
+    event: log_line                 # live, one per complete stderr line of the runner
     data: {"text": "[12:00:01] TOOL ..."}
 
-    event: heartbeat                # alle 5 s ohne anderes Event
+    event: heartbeat                # every 5 s without another event
     data: {"elapsed_s": 5.0}
 
-    event: log_dropped              # nur bei Überlast, einmal direkt vor stage_completed
+    event: log_dropped              # only on overload, once right before stage_completed
     data: {"count": 42}
 
-    event: stage_completed          # genau EIN Terminal-Event mit dem vollen Stage-Objekt
+    event: stage_completed          # exactly ONE terminal event with the full stage object
     data: {"stage_id": "...", "status": "success", "exit_code": 0, "pid": 12345,
            "model": "...", "project": "...", "started_at": "...", "finished_at": "...",
-           "duration_s": 12.3, "summary": "<finish_stage-Zusammenfassung>",
-           "stdout_tail": "", "stderr_tail": "<letzte ~8 KB>"}
+           "duration_s": 12.3, "summary": "<finish_stage summary>",
+           "stdout_tail": "", "stderr_tail": "<last ~8 KB>"}
 
-- `log_line` ist roher Logtext und best-effort: die Event-Queue pro Stage hat 1000
-  Plätze; bei langsamem oder getrenntem Client werden Log-Zeilen verworfen und
-  gezählt (`log_dropped`). `stage_started` und `stage_completed` kommen immer an.
-  Einzelne Zeilen werden bei 64 KB gekappt (Suffix ` ...[Zeile gekuerzt]`).
-- Kein Token-Streaming und keine strukturierten Tool-Events (Zielarchitektur v1).
-- Eine Client-Trennung bricht die Stage nicht ab. Abbruch nur über `/abort`.
+- `log_line` is raw log text and best effort: the event queue per stage has 1000
+  slots; with a slow or disconnected client, log lines are dropped and counted
+  (`log_dropped`). `stage_started` and `stage_completed` always arrive.
+  Individual lines are capped at 64 KB (suffix ` ...[line truncated]`).
+- No token streaming and no structured tool events (target architecture v1).
+- A client disconnect does not abort the stage. Abort only via `/abort`.
 
-Beispiel:
+Example:
 
     curl.exe -N -i -X POST http://127.0.0.1:8734/sessions/<id>/messages ^
       -H "Content-Type: application/json" ^
-      -d "{\"message\": \"Sag kurz Hallo und ruf dann finish_stage auf\"}"
+      -d "{\"message\": \"Say hello briefly and then call finish_stage\"}"
 
 ## POST /sessions/{id}/abort
 
-Beendet den Prozessbaum der laufenden Stage und wartet auf deren Finalisierung.
-Antwort `200`: `{"session_id": "...", "stage": <Stage-Objekt mit status "aborted">}`.
-`404` unbekannte Session, `409` keine laufende Stage, `500` wenn die Stage 30 s nach
-dem Kill nicht finalisiert ist.
+Terminates the process tree of the running stage and waits for its finalization.
+Response `200`: `{"session_id": "...", "stage": <stage object with status "aborted">}`.
+`404` unknown session, `409` no running stage, `500` if the stage is not finalized
+30 s after the kill.
 
-## Stage-Status
+## Error messages
 
-| status | exit_code | Bedeutung |
+Error responses use FastAPI's `{"detail": "..."}` format with English texts:
+`unknown session_id` (404), `stage already running for this session` (409),
+`no running stage for this session` (409), `stage subprocess could not be started`
+(500), `stage was not finalized after the kill` (500).
+
+## Stage status
+
+| status | exit_code | Meaning |
 |---|---|---|
-| `running` | null | Stage läuft |
-| `success` | 0 | Runner erfolgreich |
-| `error` | 1 | Runner-Fehler bzw. `success=false` |
-| `wall_clock` | 2 | interne 20-min-Notbremse des Runners |
-| `max_iterations` | 3 | Iterationslimit des Runners |
-| `aborted` | null | Nutzer-Abbruch über `/abort` |
-| `watchdog_timeout` | null | API-Watchdog (25 min) hat die Stage beendet |
-| `incomplete` | null | Stage lief noch, als die API neu startete; wird nicht neu ausgeführt |
-| `unknown_rc_N` | N | defensiv, sollte nicht vorkommen |
+| `running` | null | stage is running |
+| `success` | 0 | runner succeeded |
+| `error` | 1 | runner error or `success=false` |
+| `wall_clock` | 2 | runner's internal 20 min emergency brake |
+| `max_iterations` | 3 | runner's iteration limit |
+| `aborted` | null | user abort via `/abort` |
+| `watchdog_timeout` | null | the API watchdog (25 min) terminated the stage |
+| `incomplete` | null | stage was still running when the API restarted; it is not re-run |
+| `unknown_rc_N` | N | defensive, should not occur |
 
-Der Status kommt ausschließlich aus dem Exit-Code. `summary` ist reiner
-Anzeigetext: die finish_stage-Zusammenfassung ab dem Marker `=== STAGE BEENDET`.
+The status comes exclusively from the exit code. `summary` is pure display text:
+the finish_stage summary after the `=== STAGE BEENDET` marker (written by
+`stage_runner.py`). If no summary is available, the API fills in an English
+fallback text (e.g. `Aborted: wall-clock limit (20 min) reached, no finish_stage
+call.`).
 
-## Testen
+## Testing
 
     curl.exe -i -X POST http://127.0.0.1:8734/sessions
     curl.exe -i http://127.0.0.1:8734/sessions/<session_id>
-    curl.exe -i http://127.0.0.1:8734/sessions/keine-id    # erwartet: 404
+    curl.exe -i http://127.0.0.1:8734/sessions/no-such-id  # expected: 404
     curl.exe -i http://127.0.0.1:8734/health

@@ -1,22 +1,22 @@
 # Copyright (C) 2026 Robert Backhaus
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-"""Konfiguration und Datenverzeichnis von Reaper-AI.
+"""Configuration and data directory of Reaper-AI.
 
-Prioritaet (hoechste zuerst): CLI-Option > Umgebungsvariable > config.toml im
-Datenverzeichnis > eingebauter Default. main.py liest ausschliesslich die
-Umgebungsvariablen; die CLI (cli.py) setzt sie vor dem Serverstart aus
-CLI-Optionen und config.toml.
+Priority (highest first): CLI option > environment variable > config.toml in the
+data directory > built-in default. main.py reads only the environment variables;
+the CLI (cli.py) sets them from CLI options and config.toml before the server
+starts.
 
-Umgebungsvariablen / config.toml-Schluessel:
+Environment variables / config.toml keys:
 
-    REAPER_AI_HOME               Datenverzeichnis (Sessions, Temp-Tasks, config.toml, PID)
-    REAPER_HOST          host    Bind-Adresse          (Default 127.0.0.1)
-    REAPER_PORT          port    Port                  (Default 8734)
-    REAPER_OLLAMA_URL    ollama_url     Ollama-Endpunkt (Default http://127.0.0.1:11434)
-    REAPER_STAGE_RUNNER_DIR      runner_dir     Verzeichnis von stage_runner.py
-    REAPER_STAGE_PYTHON          runner_python  Python der Runner-venv
-    REAPER_STAGE_RUNNER_SCRIPT   runner_script  Pfad zu stage_runner.py
+    REAPER_AI_HOME               data directory (sessions, temp tasks, config.toml, PID)
+    REAPER_HOST          host    bind address          (default 127.0.0.1)
+    REAPER_PORT          port    port                  (default 8734)
+    REAPER_OLLAMA_URL    ollama_url     Ollama endpoint (default http://127.0.0.1:11434)
+    REAPER_STAGE_RUNNER_DIR      runner_dir     directory of stage_runner.py
+    REAPER_STAGE_PYTHON          runner_python  Python of the runner venv
+    REAPER_STAGE_RUNNER_SCRIPT   runner_script  path to stage_runner.py
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ DEFAULT_PORT = 8734
 DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434"
 DEFAULT_RUNNER_DIR = Path(r"C:\tools\stage-runner")
 
-# config.toml-Schluessel -> Umgebungsvariable
+# config.toml key -> environment variable
 CONFIG_ENV = {
     "host": "REAPER_HOST",
     "port": "REAPER_PORT",
@@ -47,7 +47,7 @@ CONFIG_ENV = {
 
 
 def default_data_dir() -> Path:
-    """Plattformueblicher Ort fuer Nutzerdaten, ausserhalb des installierten Pakets."""
+    """Platform-conventional location for user data, outside the installed package."""
     if sys.platform == "win32":
         base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
         return Path(base) / APP_NAME
@@ -67,8 +67,8 @@ def default_runner_python(runner_dir: Path) -> Path:
 
 
 def load_config_file(directory: Path) -> dict:
-    """Liest <directory>/config.toml; fehlende Datei = leere Konfiguration.
-    Unbekannte Schluessel werden ignoriert."""
+    """Reads <directory>/config.toml; a missing file = empty configuration.
+    Unknown keys are ignored."""
     path = directory / CONFIG_FILE
     if not path.is_file():
         return {}
@@ -78,12 +78,12 @@ def load_config_file(directory: Path) -> dict:
 
 
 def apply_config_to_env(cfg: dict) -> None:
-    """Uebertraegt config.toml-Werte in die Umgebung, OHNE bereits gesetzte
-    Umgebungsvariablen zu ueberschreiben."""
+    """Transfers config.toml values into the environment WITHOUT overwriting
+    environment variables that are already set."""
     for key, value in cfg.items():
         env = CONFIG_ENV[key]
         if str(value).strip() == "":
-            continue  # leerer Eintrag = nicht konfiguriert (Default greift)
+            continue  # empty entry = not configured (default applies)
         if not os.environ.get(env):
             os.environ[env] = str(value)
 

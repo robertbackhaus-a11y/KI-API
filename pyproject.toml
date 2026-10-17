@@ -8,7 +8,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "reaper-ai"
 dynamic = ["version"]
-description = "Lokale Chat-GUI und FastAPI-Schicht fuer den Stage-Runner (Ollama), Single-User, nur Loopback."
+description = "Local chat GUI and FastAPI layer for the stage runner (Ollama), single-user, loopback only."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "GPL-3.0-or-later"
