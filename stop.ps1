@@ -1,3 +1,6 @@
+# Copyright (C) 2026 Robert Backhaus
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 # Reaper API (und optional Ollama) sauber stoppen -- Gegenstueck zu run.ps1.
 $ErrorActionPreference = "Stop"
 

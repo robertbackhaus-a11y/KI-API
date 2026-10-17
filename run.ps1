@@ -1,3 +1,6 @@
+# Copyright (C) 2026 Robert Backhaus
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 # Reaper API starten -- prueft/startet Ollama bei Bedarf, startet die API
 # (eigene venv, nur Loopback 127.0.0.1:8734), oeffnet die GUI im Browser.
 $ErrorActionPreference = "Stop"

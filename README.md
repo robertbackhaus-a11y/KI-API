@@ -1,3 +1,8 @@
+<!--
+Copyright (C) 2026 Robert Backhaus
+SPDX-License-Identifier: GPL-3.0-or-later
+-->
+
 # Reaper API
 
 HTTP-Geruest fuer den Chat-Frontend-Zugang zu stage_runner.py (Zielarchitektur v1,

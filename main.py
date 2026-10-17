@@ -1,3 +1,6 @@
+# Copyright (C) 2026 Robert Backhaus
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 r"""Reaper API -- P5: HTTP-Geruest + Sessions + JSONL-Persistenz + Stage als Subprozess
 + Fehler-/Abbruchbehandlung (Prozessbaum-Kill, aktiver Watchdog, POST /abort)
 + SSE-Statusausgabe fuer POST /sessions/{id}/messages.
